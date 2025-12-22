@@ -1,6 +1,6 @@
 # D-RAG: Differentiable Retrieval-Augmented Generation (H200 + Nemotron Edition)
 
-This repository contains a high-performance implementation of **D-RAG** (Differentiable Retrieval-Augmented Generation), optimized for a **single NVIDIA H200 (141GB)** using the **NVIDIA Nemotron-3-Nano-30B (FP8)** hybrid Mamba-Transformer model.
+This repository contains a high-performance implementation of **D-RAG** (Differentiable Retrieval-Augmented Generation), optimized for a **single NVIDIA H200 (141GB)** using the **Unsloth-optimized Nemotron-3-Nano-30B** hybrid Mamba-Transformer model.
 
 ## 🚀 Architecture Overview
 
@@ -9,21 +9,22 @@ D-RAG is an end-to-end differentiable pipeline where the retriever learns from t
 1.  **GNN Retriever:** A 2-layer Graph Attention Network (GATConv) that scores facts in a Knowledge Graph subset.
 2.  **Differentiable Sampler:** Uses **Gumbel-TopK** to sample a "soft" subgraph, allowing gradients to flow back to the retriever.
 3.  **The Projector:** An MLP bridging GNN embeddings into the Nemotron semantic space (dim 2688).
-4.  **Generator (Nemotron-3-Nano):** A 30B parameter Hybrid Mamba-Transformer model (3.6B active params via MoE) fine-tuned via LoRA. Retrieval context is injected via **Prefix Tuning**.
+4.  **Generator (Nemotron-3-Nano):** A 30B parameter Hybrid Mamba-Transformer model (3.6B active params via MoE) fine-tuned via **Unsloth's optimized LoRA**. Retrieval context is injected via **Prefix Tuning**.
 
-## 🧠 Model: Nemotron-3-Nano-30B (FP8)
+## 🧠 Model: Nemotron-3-Nano-30B (Unsloth Optimized)
 
 The model uses a hybrid architecture:
 *   **Mamba-2 Layers:** For efficient, sequential long-context processing (up to 1M tokens).
 *   **Attention Layers:** Interleaved for complex reasoning.
 *   **Mixture-of-Experts (MoE):** Only ~3.6B parameters are active per token, making it extremely fast.
-*   **FP8 Precision:** Optimized for H200 using `transformer-engine`'s FP8 support for weights and activations.
+*   **Unsloth Acceleration:** Uses Unsloth's `FastLanguageModel` for 2x faster training and 30% less VRAM usage.
+*   **FP8 Precision:** Optimized for H200 using `transformer-engine`'s FP8 support within the training loop.
 
 ## ⚡ Hardware & Requirements
 
 ### Hardware
 *   **GPU:** 1x NVIDIA H200 (141GB VRAM).
-*   **Precision:** FP8 (Weights/Activations) + BF16 (Neural Prompts/Gradients).
+*   **Precision:** FP8/BF16 mixed precision.
 
 ### Software
 ```bash
@@ -31,11 +32,12 @@ The model uses a hybrid architecture:
 uv venv .venv
 # Activate: source .venv/bin/activate (Unix) or .\.venv\Scripts\Activate.ps1 (Windows)
 
-# Core dependencies
+# Core dependencies (including Unsloth)
 uv pip install -U transformers accelerate peft bitsandbytes datasets
 uv pip install -U flash-attn --no-build-isolation
-uv pip install transformer-engine[pytorch]  # Critical for H200 FP8 optimization
-uv pip install torch_geometric  # For the GNN component
+uv pip install transformer-engine[pytorch]
+uv pip install "unsloth[base] @ git+https://github.com/unslothai/unsloth.git"
+uv pip install torch_geometric
 ```
 
 ## 📂 Project Structure
@@ -101,7 +103,7 @@ Jointly optimize Retriever, Projector, and Nemotron (via LoRA all-linear targeti
 python -m src.trainer.train_phase2 \
     --kg_path data/kg/freebase_2hop.txt \
     --gnn_checkpoint checkpoints/phase1_best.pt \
-    --llm_model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
+    --llm_model unsloth/Nemotron-3-Nano-30B-A3B-FP8 \
     --k_facts 10 \
     --lr 5e-5
 ```

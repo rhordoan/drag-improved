@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model, TaskType
+from unsloth import FastLanguageModel
+from transformers import AutoTokenizer
 
 try:
     from transformer_engine.pytorch import fp8_autocast
@@ -10,40 +10,42 @@ except ImportError:
     TE_AVAILABLE = False
 
 class NemotronGenerator(nn.Module):
-    def __init__(self, model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8", use_lora=True):
+    def __init__(self, model_id="unsloth/Nemotron-3-Nano-30B-A3B-FP8", use_lora=True):
         super(NemotronGenerator, self).__init__()
         
-        print(f"Loading tokenizer: {model_id}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        print(f"Loading Unsloth model and tokenizer: {model_id}")
+        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+            model_name = model_id,
+            max_seq_length = 2048,
+            load_in_4bit = False, # Set to True for 4-bit quantization if needed
+            load_in_8bit = False,
+            trust_remote_code = True,
+            unsloth_force_compile = True, # Optimized inference/training
+            attn_implementation = "eager", # Or "flash_attention_2" if supported on H200
+        )
+        
         # Fix for open-ended generation / batching
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        print(f"Loading model: {model_id}")
-        # H200 optimized load
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2"
-        )
-        
         if use_lora:
-            print("Applying LoRA (all-linear targeting)...")
-            peft_config = LoraConfig(
-                r=64,
-                lora_alpha=128,
-                target_modules="all-linear",
-                lora_dropout=0.05,
-                bias="none",
-                task_type=TaskType.CAUSAL_LM,
+            print("Applying Unsloth optimized LoRA...")
+            self.model = FastLanguageModel.get_peft_model(
+                self.model,
+                r = 64, # Matches user's previous preference, or 8-128
+                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                                 "gate_proj", "up_proj", "down_proj",
+                                 "in_proj", "out_proj",], # Optimized targets for Nemotron
+                lora_alpha = 128,
+                lora_dropout = 0, # Unsloth optimized at 0
+                bias = "none",    # Unsloth optimized at "none"
+                use_gradient_checkpointing = "unsloth", # 30% less VRAM
+                random_state = 3407,
             )
-            self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()
 
     def forward(self, neural_prompt_embeds, questions, labels=None):
         """
-        Forward pass with Prefix Tuning.
+        Forward pass with Prefix Tuning using Unsloth optimizations.
         neural_prompt_embeds: [batch_size, k_facts, hidden_size]
         questions: List of strings
         """
@@ -56,9 +58,8 @@ class NemotronGenerator(nn.Module):
         ).to(self.model.device)
         
         # 2. Get text embeddings
-        # Use peft model's base model if LoRA is applied
-        base_model = self.model.base_model.model if hasattr(self.model, "base_model") else self.model
-        text_embeds = base_model.get_input_embeddings()(text_inputs.input_ids)
+        # Unsloth model wraps the base model
+        text_embeds = self.model.get_input_embeddings()(text_inputs.input_ids)
         
         # 3. Fuse: [Neural Prompts] + [Text Embeddings]
         # Cast neural_prompt_embeds to bfloat16 for the LLM
@@ -66,7 +67,7 @@ class NemotronGenerator(nn.Module):
         combined_embeds = torch.cat([neural_prompt_embeds, text_embeds], dim=1)
         
         # 4. Forward
-        # During training, set use_cache=False to save memory
+        # Use fp8_autocast if available (optimized for H200)
         if TE_AVAILABLE:
             with fp8_autocast(enabled=True):
                 outputs = self.model(
@@ -85,7 +86,7 @@ class NemotronGenerator(nn.Module):
 
     def generate(self, neural_prompt_embeds, questions, max_new_tokens=100):
         """
-        Generation helper
+        Generation helper using Unsloth native inference.
         """
         text_inputs = self.tokenizer(
             questions,
@@ -94,13 +95,12 @@ class NemotronGenerator(nn.Module):
             add_special_tokens=False
         ).to(self.model.device)
         
-        base_model = self.model.base_model.model if hasattr(self.model, "base_model") else self.model
-        text_embeds = base_model.get_input_embeddings()(text_inputs.input_ids)
+        text_embeds = self.model.get_input_embeddings()(text_inputs.input_ids)
         
         neural_prompt_embeds = neural_prompt_embeds.to(torch.bfloat16)
         combined_embeds = torch.cat([neural_prompt_embeds, text_embeds], dim=1)
         
-        # Note: generation with inputs_embeds is supported in HF
+        # Unsloth native inference is faster
         if TE_AVAILABLE:
             with fp8_autocast(enabled=True):
                 gen_outputs = self.model.generate(
@@ -120,4 +120,3 @@ class NemotronGenerator(nn.Module):
             )
         
         return self.tokenizer.batch_decode(gen_outputs, skip_special_tokens=True)
-

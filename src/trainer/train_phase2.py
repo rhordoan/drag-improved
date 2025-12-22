@@ -93,7 +93,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 2: Joint End-to-End Training (D-RAG).")
     parser.add_argument("--kg_path", type=str, required=True)
     parser.add_argument("--gnn_checkpoint", type=str, help="Path to warmed-up GNN.")
-    parser.add_argument("--llm_model", type=str, default="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8")
+    parser.add_argument("--llm_model", type=str, default="unsloth/Nemotron-3-Nano-30B-A3B-FP8")
     parser.add_argument("--k_facts", type=int, default=10, help="Number of facts to retrieve.")
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--epochs", type=int, default=5)
