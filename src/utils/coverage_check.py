@@ -39,6 +39,20 @@ if __name__ == "__main__":
     parser.add_argument("--entities", type=str, required=True, help="Path to entities map (tab-separated or similar).")
     args = parser.parse_args()
     
-    # Load entities_map here...
-    # check_coverage(args.dataset, entities_map)
+    # Load entities_map from the provided file
+    if not os.path.exists(args.entities):
+        print(f"Entities file {args.entities} not found.")
+    else:
+        entities_set = set()
+        print(f"Loading entities from {args.entities}...")
+        with open(args.entities, 'r', encoding='utf-8') as f:
+            for line in f:
+                # Handle both single MID per line and tab-separated triples
+                parts = line.strip().split('\t')
+                if len(parts) >= 1:
+                    entities_set.add(parts[0])
+                if len(parts) >= 3:
+                    entities_set.add(parts[2])
+        
+        check_coverage(args.dataset, entities_set)
 
