@@ -98,13 +98,15 @@ python -m src.trainer.train_phase1 \
 ```
 
 ### Phase 2: Joint End-to-End Training (D-RAG)
-Jointly optimize Retriever, Projector, and Nemotron (via LoRA all-linear targeting).
+Jointly optimize Retriever, Projector, and Nemotron (via LoRA).
 ```bash
 python -m src.trainer.train_phase2 \
     --kg_path data/kg/freebase_2hop.txt \
+    --dataset_path data/webqsp/WebQSP.train.json \
     --gnn_checkpoint checkpoints/phase1_best.pt \
     --llm_model unsloth/Nemotron-3-Nano-30B-A3B-FP8 \
     --k_facts 10 \
+    --batch_size 1 \
     --lr 5e-5
 ```
 
