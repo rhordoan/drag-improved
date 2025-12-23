@@ -1,6 +1,8 @@
+# IMPORTANT: Unsloth must be imported FIRST before torch/transformers
+from unsloth import FastLanguageModel
+
 import torch
 import torch.nn as nn
-from unsloth import FastLanguageModel
 
 try:
     from transformer_engine.pytorch import fp8_autocast
@@ -109,7 +111,11 @@ class NemotronGenerator(nn.Module):
         text_embeds = self.model.get_input_embeddings()(full_inputs.input_ids)
         
         # 3. Fuse: [Neural Prompts] + [Text Embeddings]
-        neural_prompt_embeds = neural_prompt_embeds.to(text_embeds.dtype)
+        # IMPORTANT: Use a gradient-preserving dtype conversion
+        # .to() creates a new tensor node; we need to maintain the gradient chain
+        if neural_prompt_embeds.dtype != text_embeds.dtype:
+            # Cast while preserving gradient flow
+            neural_prompt_embeds = neural_prompt_embeds.type_as(text_embeds)
         combined_embeds = torch.cat([neural_prompt_embeds, text_embeds], dim=1)
         
         # 4. Create labels with proper masking
@@ -233,9 +239,17 @@ def verify_gradient_flow(generator, projector, sample_input):
     """
     print("Verifying gradient flow through Mamba...")
     
-    # Create dummy neural prompt with gradient tracking
-    neural_prompt = torch.randn(1, 5, 2688, requires_grad=True, device=generator.model.device)
-    neural_prompt = neural_prompt.to(torch.bfloat16)
+    # Create dummy neural prompt directly in bfloat16 with gradient tracking
+    # IMPORTANT: Create in target dtype from the start to avoid dtype conversion issues
+    neural_prompt = torch.randn(
+        1, 5, 2688, 
+        requires_grad=True, 
+        device=generator.model.device,
+        dtype=torch.bfloat16
+    )
+    
+    # Retain grad on this tensor so we can check it after backward
+    neural_prompt.retain_grad()
     
     # Dummy question and answer
     questions = ["What is the capital of France?"]

@@ -37,8 +37,13 @@ class QuestionEncoder(nn.Module):
             return_tensors="pt"
         ).to(self.model.device)
         
-        with torch.no_grad():
+        # Allow gradients to flow during training if parameters are unfrozen
+        # Otherwise use no_grad for efficiency
+        if self.training and any(p.requires_grad for p in self.model.parameters()):
             outputs = self.model(**encoded)
+        else:
+            with torch.no_grad():
+                outputs = self.model(**encoded)
         
         embeddings = self.mean_pooling(outputs, encoded['attention_mask'])
         return embeddings
