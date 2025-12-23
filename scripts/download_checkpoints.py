@@ -14,7 +14,7 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 # Hugging Face repository
-REPO_ID = "rhordoan/drag-improved-checkpoints"
+REPO_ID = "rhordoancc/drag-improved-checkpoints"
 
 # Files to download
 FILES = [

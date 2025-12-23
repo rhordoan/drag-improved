@@ -2,7 +2,7 @@
 
 This document describes the pre-trained Phase 1 checkpoints for D-RAG.
 
-> **🤗 Storage:** Checkpoints are hosted on [Hugging Face Hub](https://huggingface.co/rhordoan/drag-improved-checkpoints) due to GitHub's 100MB file size limit. They are automatically downloaded when you run `./scripts/setup_environment.sh`.
+> **🤗 Storage:** Checkpoints are hosted on [Hugging Face Hub](https://huggingface.co/rhordoancc/drag-improved-checkpoints) due to GitHub's 100MB file size limit. They are automatically downloaded when you run `./scripts/setup_environment.sh`.
 
 ## Available Checkpoints
 

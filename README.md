@@ -28,7 +28,7 @@ python -m src.trainer.train_phase2 \
 
 ### Phase 1 Checkpoints (GNN Pre-training)
 
-> **Note:** Checkpoints and heuristics (~700 MB) are automatically downloaded from [🤗 Hugging Face](https://huggingface.co/rhordoan/drag-improved-checkpoints) when you run `setup_environment.sh`.
+> **Note:** Checkpoints and heuristics (~700 MB) are automatically downloaded from [🤗 Hugging Face](https://huggingface.co/rhordoancc/drag-improved-checkpoints) when you run `setup_environment.sh`.
 
 | Dataset | Samples | Checkpoint | Training Time |
 |---------|---------|------------|---------------|

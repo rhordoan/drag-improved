@@ -10,7 +10,7 @@
 
 set -e
 
-REPO_ID="rhordoan/drag-improved-checkpoints"
+REPO_ID="rhordoancc/drag-improved-checkpoints"
 
 echo "========================================="
 echo "Uploading D-RAG files to Hugging Face"
