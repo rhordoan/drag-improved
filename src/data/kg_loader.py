@@ -352,6 +352,9 @@ class SubgraphDataset:
         return {
             'question': question,
             'answer': answer,
+            # Preserve original textual triples so we can build the paper-style "Provided facts"
+            # prompt during Phase 2 (fact index == triple index for this subgraph).
+            'triples': triples,
             'subgraph': subgraph,
             'rel_texts': rel_texts,
             'labels': labels,

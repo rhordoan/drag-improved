@@ -14,12 +14,23 @@ source .venv/bin/activate
 
 # 3. Run Phase 2 training (CWQ)
 python -m src.trainer.train_phase2 \
-    --heuristics_path data/train_heuristics_cwq.jsonl \
+    --heuristics_path data/train_heuristics_cwq_train.jsonl \
+    --val_heuristics_path data/train_heuristics_cwq_val.jsonl \
     --phase1_checkpoint checkpoints_cwq_subgraph/phase1_best.pt \
-    --epochs 5 \
-    --batch_size 1 \
-    --generator_model "unsloth/Nemotron-3-Nano-30B-A3B" \
-    --checkpoint_dir checkpoints_cwq_phase2
+    --checkpoint_dir checkpoints_cwq_phase2_paperprompt \
+    --epochs 20 \
+    --batch_size 64 \
+    --lr 5e-5 \
+    --weight_decay 0.001 \
+    --temperature 0.5 \
+    --ret_loss_weight 0.1 \
+    --max_facts_cap 100 \
+    --prob_threshold 0.03 \
+    --val_generation \
+    --val_max_new_tokens 50 \
+    --val_generation_limit 200 \
+    --val_log_samples 5 \
+    --eos_loss_weight 1.0
 ```
 
 ---
@@ -50,6 +61,8 @@ Each sample contains:
 ```
 data/
 ├── train_heuristics_cwq.jsonl           # 27,631 CWQ samples (111 MB) - auto-downloaded
+├── train_heuristics_cwq_train.jsonl     # CWQ Phase 2 train split (JSONL)
+├── train_heuristics_cwq_val.jsonl       # CWQ Phase 2 val split (JSONL)
 ├── train_heuristics_webqsp_subgraph.jsonl  # 2,826 WebQSP samples (12 MB) - auto-downloaded
 ```
 
@@ -167,8 +180,8 @@ Jointly trains retriever + projector + generator (Nemotron via LoRA).
 #### Setup (run once per session)
 ```bash
 # Set CUDA paths (required for Mamba)
-export PATH=/usr/local/cuda-12.6/bin:$PATH
-export CUDA_HOME=/usr/local/cuda-12.6
+export PATH=/usr/local/cuda-13.0/bin:$PATH
+export CUDA_HOME=/usr/local/cuda-13.0
 
 # Activate environment
 source .venv/bin/activate
@@ -177,18 +190,23 @@ source .venv/bin/activate
 #### CWQ Dataset - Phase 2
 ```bash
 python -m src.trainer.train_phase2 \
-    --heuristics_path data/train_heuristics_cwq.jsonl \
+    --heuristics_path data/train_heuristics_cwq_train.jsonl \
+    --val_heuristics_path data/train_heuristics_cwq_val.jsonl \
     --phase1_checkpoint checkpoints_cwq_subgraph/phase1_best.pt \
-    --epochs 5 \
-    --batch_size 1 \
+    --checkpoint_dir checkpoints_cwq_phase2_paperprompt \
+    --epochs 20 \
+    --batch_size 64 \
     --lr 5e-5 \
-    --k_facts 10 \
-    --node_dim 256 \
-    --hidden_dim 256 \
-    --relation_dim 256 \
-    --num_reasoning_steps 3 \
-    --generator_model "unsloth/Nemotron-3-Nano-30B-A3B" \
-    --checkpoint_dir checkpoints_cwq_phase2
+    --weight_decay 0.001 \
+    --temperature 0.5 \
+    --ret_loss_weight 0.1 \
+    --max_facts_cap 100 \
+    --prob_threshold 0.03 \
+    --val_generation \
+    --val_max_new_tokens 50 \
+    --val_generation_limit 200 \
+    --val_log_samples 5 \
+    --eos_loss_weight 1.0
 ```
 
 #### WebQSP Dataset - Phase 2
@@ -199,13 +217,43 @@ python -m src.trainer.train_phase2 \
     --epochs 5 \
     --batch_size 1 \
     --lr 5e-5 \
-    --k_facts 10 \
-    --node_dim 256 \
-    --hidden_dim 256 \
-    --relation_dim 256 \
-    --num_reasoning_steps 3 \
+    --max_facts_cap 100 \
+    --prob_threshold 0.01 \
     --generator_model "unsloth/Nemotron-3-Nano-30B-A3B" \
     --checkpoint_dir checkpoints_webqsp_phase2
+```
+
+#### Run Phase 2 in the background (keeps running if terminal closes)
+```bash
+cd /home/shadeform/nlp/drag-improved && \
+source .venv/bin/activate && \
+export CUDA_HOME=/usr/local/cuda-13.0 && \
+export PATH=/usr/local/cuda-13.0/bin:$PATH && \
+export TRITON_PTXAS_PATH=/usr/local/cuda-13.0/bin/ptxas && \
+export PYTHONPATH=/home/shadeform/nlp/drag-improved && \
+mkdir -p logs && \
+ts=$(date +%Y%m%d_%H%M%S) && \
+log="logs/phase2_train_${ts}.log" && \
+nohup python -u -m src.trainer.train_phase2 \
+  --heuristics_path data/train_heuristics_cwq_train.jsonl \
+  --val_heuristics_path data/train_heuristics_cwq_val.jsonl \
+  --phase1_checkpoint checkpoints_cwq_subgraph/phase1_best.pt \
+  --checkpoint_dir checkpoints_cwq_phase2_paperprompt \
+  --epochs 20 \
+  --batch_size 64 \
+  --lr 5e-5 \
+  --weight_decay 0.001 \
+  --temperature 0.5 \
+  --ret_loss_weight 0.1 \
+  --max_facts_cap 100 \
+  --prob_threshold 0.03 \
+  --val_generation \
+  --val_max_new_tokens 50 \
+  --val_generation_limit 200 \
+  --val_log_samples 5 \
+  --eos_loss_weight 1.0 \
+  > "$log" 2>&1 < /dev/null & \
+pid=$! && disown && echo "STARTED pid=$pid log=$log"
 ```
 
 #### Phase 2 Arguments Reference
@@ -213,13 +261,20 @@ python -m src.trainer.train_phase2 \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--heuristics_path` | required | Path to JSONL with questions + subgraphs |
+| `--val_heuristics_path` | None | Optional validation JSONL (runs per-epoch validation if provided) |
 | `--phase1_checkpoint` | required | Pre-trained GNN checkpoint from Phase 1 |
 | `--generator_model` | `unsloth/Nemotron-3-Nano-30B-A3B` | Nemotron model (BF16 recommended) |
 | `--epochs` | 5 | Number of joint training epochs |
 | `--batch_size` | 1 | Batch size (increase on B200) |
-| `--k_facts` | 10 | Number of facts to retrieve per question |
 | `--lr` | 5e-5 | Learning rate |
 | `--ret_loss_weight` | 0.1 | Weight for retriever auxiliary loss |
+| `--max_facts_cap` | 100 | Cap for fact selection (paper uses 100) |
+| `--prob_threshold` | 0.01 | Inference/validation threshold for fact filtering |
+| `--val_generation` | False | Run free generation during validation to compute Hits@1/EM/F1 |
+| `--val_max_new_tokens` | 50 | Max tokens to generate during validation |
+| `--val_generation_limit` | 0 | If >0, only run generation on first N val examples (speed knob) |
+| `--eos_loss_weight` | 1.0 | Upweight EOS token loss to help greedy stopping |
+| `--use_grad_norm_balance` | False | Paper-aligned gradient-norm loss balancing (can be unstable) |
 
 ---
 
@@ -230,11 +285,13 @@ With more VRAM, you can increase batch size for better gradient estimates:
 ```bash
 # B200 optimized settings
 python -m src.trainer.train_phase2 \
-    --heuristics_path data/train_heuristics_cwq.jsonl \
+    --heuristics_path data/train_heuristics_cwq_train.jsonl \
+    --val_heuristics_path data/train_heuristics_cwq_val.jsonl \
     --phase1_checkpoint checkpoints_cwq_subgraph/phase1_best.pt \
     --epochs 5 \
     --batch_size 4 \
-    --k_facts 15 \
+    --max_facts_cap 100 \
+    --prob_threshold 0.03 \
     --generator_model "unsloth/Nemotron-3-Nano-30B-A3B" \
     --checkpoint_dir checkpoints_cwq_phase2
 ```

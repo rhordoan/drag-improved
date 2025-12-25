@@ -26,9 +26,23 @@ source .venv/bin/activate
 echo "✓ Virtual environment activated"
 
 # 2. Set CUDA environment
-export PATH=/usr/local/cuda-12.6/bin:$PATH
-export CUDA_HOME=/usr/local/cuda-12.6
-echo "✓ CUDA environment set"
+# Prefer newer toolkit if present (Blackwell GPUs require newer ptxas for Triton kernels)
+if [ -d "/usr/local/cuda-13.0" ]; then
+    export PATH=/usr/local/cuda-13.0/bin:$PATH
+    export CUDA_HOME=/usr/local/cuda-13.0
+    # Triton defaults to a bundled ptxas; override to use system ptxas which supports newer SMs (e.g., sm_103)
+    export TRITON_PTXAS_PATH=/usr/local/cuda-13.0/bin/ptxas
+    echo "✓ CUDA environment set (13.0)"
+elif [ -d "/usr/local/cuda-12.8" ]; then
+    export PATH=/usr/local/cuda-12.8/bin:$PATH
+    export CUDA_HOME=/usr/local/cuda-12.8
+    # Even on CUDA 12.8, Triton may use a bundled ptxas which can lag behind and fail on newer SMs.
+    # Prefer the system ptxas from the selected toolkit.
+    export TRITON_PTXAS_PATH=/usr/local/cuda-12.8/bin/ptxas
+    echo "✓ CUDA environment set (12.8)"
+else
+    echo "WARNING: No /usr/local/cuda-13.0 or /usr/local/cuda-12.8 found. You may need to set CUDA_HOME/PATH manually."
+fi
 
 # 3. Check if gcc-11 is available (needed for mamba-ssm compilation)
 echo ""
@@ -102,7 +116,9 @@ echo "✓ Environment setup complete!"
 echo ""
 echo "Next steps:"
 echo "  1. Activate: source .venv/bin/activate"
-echo "  2. Set CUDA: export PATH=/usr/local/cuda-12.6/bin:\$PATH && export CUDA_HOME=/usr/local/cuda-12.6"
+echo "  2. Set CUDA:"
+echo "     - CUDA 13.0: export PATH=/usr/local/cuda-13.0/bin:\$PATH && export CUDA_HOME=/usr/local/cuda-13.0 && export TRITON_PTXAS_PATH=/usr/local/cuda-13.0/bin/ptxas"
+echo "     - CUDA 12.8: export PATH=/usr/local/cuda-12.8/bin:\$PATH && export CUDA_HOME=/usr/local/cuda-12.8"
 echo "  3. Run Phase 2:"
 echo "     python -m src.trainer.train_phase2 \\"
 echo "         --heuristics_path data/train_heuristics_cwq.jsonl \\"

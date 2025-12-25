@@ -24,7 +24,9 @@ ENV/
 .ipynb_checkpoints/
 
 # Large files (Phase 2 checkpoints are huge due to generator)
+# Note: we sometimes create variants like checkpoints_cwq_phase2_paperprompt/
 checkpoints_*_phase2/
+checkpoints_*_phase2*/
 *.gguf
 
 # Phase 1 checkpoints and heuristics (stored on Hugging Face)
@@ -33,6 +35,8 @@ checkpoints_*_phase2/
 checkpoints_cwq_subgraph/phase1_best.pt
 checkpoints_webqsp_subgraph/phase1_best.pt
 data/train_heuristics_cwq.jsonl
+data/train_heuristics_cwq_train.jsonl
+data/train_heuristics_cwq_val.jsonl
 data/train_heuristics_webqsp_subgraph.jsonl
 
 # Keep intermediate epoch checkpoints (smaller, useful for debugging)
@@ -47,6 +51,7 @@ data/train_heuristics_webqsp_subgraph.jsonl
 # Cache
 .cache/
 *.cache
+unsloth_compiled_cache/
 
 # OS
 .DS_Store
