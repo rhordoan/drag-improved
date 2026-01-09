@@ -88,7 +88,6 @@ def main():
     print()
     print("To train:")
     print(f"  python -m src.trainer.train_phase1 \\")
-    print(f"      --kg_path data/kg/fb15k237.txt \\")
     print(f"      --heuristics_path {output_path} \\")
     print(f"      --epochs 10 --batch_size 16")
     print("=" * 60)
