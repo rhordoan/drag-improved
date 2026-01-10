@@ -152,7 +152,7 @@ def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int 
                 pth = _bfs_path(adj, qe, ae, max_hops=max_hops)
                 if pth and len(pth) >= 2:
                     paths.append(pth)
-
+        
         # Fallback: if no connecting path found, add a few real 1-hop edges touching answer/q entities.
         if not paths:
             seed_entities = []
@@ -175,7 +175,7 @@ def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int 
                 answer_out = answer_out[0]
         elif answer is None:
             answer_out = ""
-
+        
         heuristic = {
             "question": question,
             "paths": paths,

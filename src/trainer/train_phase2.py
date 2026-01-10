@@ -742,7 +742,7 @@ def train_phase2(args):
         
         # Save generator LoRA weights separately
         generator.model.save_pretrained(f"{args.checkpoint_dir}/generator_epoch_{epoch+1}")
-        torch.save(checkpoint, f"{args.checkpoint_dir}/phase2_epoch_{epoch+1}.pt")
+        # torch.save(checkpoint, f"{args.checkpoint_dir}/phase2_epoch_{epoch+1}.pt")
         
         if metric_for_best < best_loss:
             best_loss = metric_for_best
