@@ -117,6 +117,11 @@ class NemotronGenerator(nn.Module):
             )
             self.model.print_trainable_parameters()
 
+        # CPU-side tokenization caches to avoid re-tokenizing every step.
+        # They store tensors on CPU; we move them to device inside forward_paper_prompt.
+        self.prefix_cache = {}
+        self.fact_cache = {}
+
     def forward(self, neural_prompt_embeds, questions, answer_texts=None):
         """
         Forward pass using the paper-style D-RAG prompt:
@@ -213,12 +218,25 @@ class NemotronGenerator(nn.Module):
 
             # Prefix text: instruction + question + provided facts header
             prefix_text = f"{instr}Question: {q}\n\n{provided_facts_header}"
-            prefix_ids = self.tokenizer(prefix_text, add_special_tokens=False).input_ids
+            prefix_ids = self.prefix_cache.get(prefix_text)
+            if prefix_ids is None:
+                prefix_ids = torch.tensor(
+                    self.tokenizer(prefix_text, add_special_tokens=False).input_ids,
+                    dtype=torch.long,
+                    device="cpu",
+                )
+                self.prefix_cache[prefix_text] = prefix_ids
             # Add BOS once at the beginning of the entire prompt if available.
             bos_id = getattr(self.tokenizer, "bos_token_id", None)
             if bos_id is not None:
-                prefix_ids = [bos_id] + prefix_ids
-            prefix_ids_t = torch.tensor(prefix_ids, device=device, dtype=torch.long)
+                # If cached tensor already has BOS, skip; else prepend.
+                if prefix_ids.numel() == 0 or prefix_ids[0].item() != bos_id:
+                    prefix_ids = torch.cat(
+                        [torch.tensor([bos_id], dtype=torch.long, device="cpu"), prefix_ids],
+                        dim=0,
+                    )
+                    self.prefix_cache[prefix_text] = prefix_ids
+            prefix_ids_t = prefix_ids.to(device=device, dtype=torch.long)
             prefix_emb = embed_layer(prefix_ids_t).unsqueeze(0) if prefix_ids_t.numel() > 0 else torch.empty((1, 0, pad_embed.shape[-1]), device=device)
 
             parts_emb = [prefix_emb]  # list of [1, L, H]
@@ -232,8 +250,15 @@ class NemotronGenerator(nn.Module):
                 struct = neural_fact_embeds[i:i+1, j:j+1, :]  # [1, 1, H]
                 # Semantic text tokens for the triple
                 fact_line = f"{str(facts_i[j]).strip()}\n"
-                fact_ids = self.tokenizer(fact_line, add_special_tokens=False).input_ids
-                fact_ids_t = torch.tensor(fact_ids, device=device, dtype=torch.long)
+                cached_fact = self.fact_cache.get(fact_line)
+                if cached_fact is None:
+                    cached_fact = torch.tensor(
+                        self.tokenizer(fact_line, add_special_tokens=False).input_ids,
+                        dtype=torch.long,
+                        device="cpu",
+                    )
+                    self.fact_cache[fact_line] = cached_fact
+                fact_ids_t = cached_fact.to(device=device, dtype=torch.long)
                 fact_emb = embed_layer(fact_ids_t).unsqueeze(0) if fact_ids_t.numel() > 0 else torch.empty((1, 0, pad_embed.shape[-1]), device=device)
 
                 parts_emb.append(struct)
