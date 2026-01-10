@@ -17,6 +17,73 @@ This script produces JSONL where each line contains (at minimum):
 import argparse
 import json
 from pathlib import Path
+from collections import deque, defaultdict
+from typing import Dict, List, Optional, Tuple
+
+
+def _build_undirected_adj(triples: List[List[str]]) -> Dict[str, List[str]]:
+    adj: Dict[str, List[str]] = defaultdict(list)
+    for t in triples:
+        if not t or len(t) < 3:
+            continue
+        h, _, tail = t[0], t[1], t[2]
+        if h and tail:
+            adj[h].append(tail)
+            adj[tail].append(h)
+    return adj
+
+
+def _bfs_path(adj: Dict[str, List[str]], start: str, goal: str, max_hops: int) -> Optional[List[str]]:
+    """
+    Return a single shortest path (as entity list) from start->goal using BFS, up to max_hops edges.
+    Undirected adjacency.
+    """
+    if start == goal:
+        return [start]
+    if start not in adj or goal not in adj:
+        return None
+
+    q = deque([(start, 0)])
+    parent: Dict[str, Optional[str]] = {start: None}
+    depth: Dict[str, int] = {start: 0}
+
+    while q:
+        node, d = q.popleft()
+        if d >= max_hops:
+            continue
+        for nb in adj.get(node, []):
+            if nb in parent:
+                continue
+            parent[nb] = node
+            depth[nb] = d + 1
+            if nb == goal:
+                # reconstruct
+                path = [goal]
+                cur = goal
+                while parent[cur] is not None:
+                    cur = parent[cur]
+                    path.append(cur)
+                path.reverse()
+                return path
+            q.append((nb, d + 1))
+    return None
+
+
+def _fallback_edge_paths(adj: Dict[str, List[str]], seeds: List[str], max_paths: int) -> List[List[str]]:
+    """
+    If we can't find a multi-hop path between q_entity and a_entity within the capped subgraph,
+    fall back to a few 1-hop "paths" that correspond to real edges touching a seed entity.
+    This ensures num_positive > 0 for more examples (so they don't get filtered away).
+    """
+    out: List[List[str]] = []
+    for s in seeds:
+        if s not in adj:
+            continue
+        for nb in adj[s][: max_paths]:
+            if len(out) >= max_paths:
+                return out
+            out.append([s, nb])
+    return out
 
 
 def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int = 50):
@@ -53,27 +120,51 @@ def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int 
         
         samples_with_graph += 1
         
-        # Extract triples from graph
+        # Extract triples from graph (cap for memory/speed)
         triples = []
         for item in graph:
             if len(item) >= 3:
                 s, p, o = item[0], item[1], item[2]
                 triples.append((s, p, o))
         
-        # Create paths from topic entity to answer entities
-        # The graph itself represents the reasoning path
-        paths = []
-        
-        # Use q_entity -> a_entity as main path
-        for qe in q_entity[:2]:
-            for ae in (a_entity if a_entity else answer)[:2]:
-                paths.append([qe, ae])
-        
-        # If no direct path, use first and last entity in graph
-        if not paths and triples:
-            first_ent = triples[0][0]
-            last_ent = triples[-1][2]
-            paths.append([first_ent, last_ent])
+        triples_capped = [[s, p, o] for s, p, o in triples[: max(0, int(limit_triples))]]
+        adj = _build_undirected_adj(triples_capped)
+
+        # Build paths which actually correspond to consecutive entity pairs in the subgraph.
+        # This is crucial: downstream labeling marks an edge positive iff (path[i], path[i+1])
+        # matches some triple head/tail in `triples`.
+        paths: List[List[str]] = []
+
+        qe_list = q_entity if isinstance(q_entity, list) else ([q_entity] if q_entity else [])
+        ae_list = a_entity if isinstance(a_entity, list) else ([a_entity] if a_entity else [])
+        # If a_entity is missing, fall back to answer strings (may not match entities, but try).
+        if not ae_list and answer:
+            ae_list = answer if isinstance(answer, list) else [answer]
+
+        # Try shortest paths up to 4 hops (paper uses 3-4 hop reasoning for CWQ).
+        max_hops = 4
+        for qe in qe_list[:3]:
+            for ae in ae_list[:3]:
+                if len(paths) >= 8:
+                    break
+                if not isinstance(qe, str) or not isinstance(ae, str):
+                    continue
+                pth = _bfs_path(adj, qe, ae, max_hops=max_hops)
+                if pth and len(pth) >= 2:
+                    paths.append(pth)
+
+        # Fallback: if no connecting path found, add a few real 1-hop edges touching answer/q entities.
+        if not paths:
+            seed_entities = []
+            seed_entities.extend([x for x in ae_list[:3] if isinstance(x, str)])
+            seed_entities.extend([x for x in qe_list[:3] if isinstance(x, str)])
+            paths = _fallback_edge_paths(adj, seed_entities, max_paths=4)
+
+        # Last-resort fallback: ensure at least *something* is present if graph is non-empty.
+        if not paths and triples_capped:
+            h0, _, t0 = triples_capped[0]
+            if h0 and t0:
+                paths = [[h0, t0]]
         
         # Preserve answer format (list or string). Phase 2 supports both.
         answer_out = answer
@@ -91,7 +182,7 @@ def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int 
             "answer": answer_out,
             "graph_size": len(triples),
             # Keep per-question subgraph triples (cap for memory/speed)
-            "triples": [[s, p, o] for s, p, o in triples[: max(0, int(limit_triples))]],
+            "triples": triples_capped,
         }
         heuristics.append(heuristic)
     

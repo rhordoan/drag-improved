@@ -29,9 +29,24 @@ from src.data.kg_loader import SubgraphDataset
 from src.utils.metrics import MetricsAccumulator, compute_retrieval_metrics
 
 
-def collate_fn(batch):
-    """Custom collate function for Phase 2."""
-    batch = [b for b in batch if b is not None and b.get('num_positive', 0) > 0]
+def collate_fn_train(batch):
+    """
+    Collate fn for *training*.
+    We skip samples with 0 positives to avoid degenerate retriever supervision batches.
+    """
+    batch = [b for b in batch if b is not None and b.get("num_positive", 0) > 0]
+    if len(batch) == 0:
+        return None
+    return batch
+
+
+def collate_fn_val(batch):
+    """
+    Collate fn for *validation*.
+    IMPORTANT: Do NOT drop num_positive==0 samples, otherwise validation/generation
+    metrics get computed on a tiny (and biased) subset.
+    """
+    batch = [b for b in batch if b is not None]
     if len(batch) == 0:
         return None
     return batch
@@ -283,7 +298,7 @@ def train_phase2(args):
         dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
-        collate_fn=collate_fn,
+        collate_fn=collate_fn_train,
         num_workers=0
     )
     
@@ -304,8 +319,8 @@ def train_phase2(args):
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=0
+            collate_fn=collate_fn_val,
+            num_workers=0
     )
     
     # 3. Initialize Retriever and load Phase 1 checkpoint
