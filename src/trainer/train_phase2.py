@@ -404,6 +404,9 @@ def train_phase2(args):
         revision=args.generator_revision,
         use_lora=True,
     )
+
+    # Simple CPU-side cache for relation embeddings to avoid recomputing encodings
+    rel_embed_cache = {}
     
     # Verify gradient flow
     print("\nVerifying gradient flow through generator...")
@@ -472,255 +475,164 @@ def train_phase2(args):
             if batch is None:
                 continue
             
-            batch_loss = 0.0
-            batch_gen_loss = 0.0
-            batch_ret_loss = 0.0
-            batch_samples = 0
-            
-            for sample in batch:
-                question = sample['question']
-                answer = sample['answer']
-                subgraph = sample['subgraph']
-                rel_texts = sample['rel_texts']
-                triples = sample.get('triples', [])
-                retrieval_labels = sample['labels'].to(device)  # From Phase 1 heuristics
-                
-                if not answer:
-                    batch_samples += 1
+            # Microbatch the generator forward pass to avoid per-sample overhead.
+            batch_samples = len(batch)
+            if batch_samples == 0:
+                continue
+
+            batch_loss_acc = 0.0
+            batch_gen_acc = 0.0
+            batch_ret_acc = 0.0
+            mb_count = 0
+
+            for mb_start in range(0, batch_samples, args.generator_microbatch):
+                micro = batch[mb_start:mb_start + args.generator_microbatch]
+                if len(micro) == 0:
                     continue
 
-                global_step += 1
+                questions_mb = []
+                answers_mb = []
+                fact_texts_mb = []
+                prompt_embeds_mb = []
+                ret_losses_mb = []
 
-                # Paper-style multi-answer formatting:
-                # If the dataset provides multiple answers, train the generator to emit a bar-separated list.
-                answer_supervised = answer
-                if isinstance(answer, list):
-                    answer_supervised = " | ".join([str(a) for a in answer if str(a).strip()])
-                
-                # Paper-aligned prompt: the generator constructs the full scaffold including "Answer:"
-                question_prompt = question
-                
-                # --- Retriever Forward Pass ---
-                # Encode relations for this subgraph
-                with torch.no_grad():
-                    if len(rel_texts) > 0 and rel_texts[0]:
-                        rel_embeds = retriever.encode_relations(rel_texts).to(device)
-                    else:
-                        rel_embeds = torch.randn(len(rel_texts), args.relation_dim, device=device) * 0.02
-                
-                edge_relations = rel_embeds[subgraph.edge_type]
-                
-                # Retriever forward pass
-                fact_probs, node_embeds, fact_embeds = retriever(
-                    node_features=subgraph.x,
-                    edge_index=subgraph.edge_index,
-                    edge_attr=edge_relations,
-                    edge_relations=edge_relations,
-                    questions=[question],
-                    fact_indices=None
-                )
-                
-                # --- Differentiable Sampling (Section 4.3.2-4.3.3, Eq. 7-8) ---
-                # Convert probs to logits for Gumbel-Softmax
-                fact_logits = torch.log(fact_probs + 1e-8) - torch.log(1 - fact_probs + 1e-8)
-                
-                # Get hard binary selection mask via STE (0/1 discrete forward, soft gradients backward)
-                selection_mask = sampler(fact_logits)  # [num_facts], values are 0 or 1
-                
-                # Optional: cap at max_facts for memory efficiency (paper uses 100)
-                num_facts = selection_mask.shape[0]
-                if num_facts > args.max_facts_cap:
-                    # Keep top-100 by probability, then apply binary mask within those
-                    _, top_cap_indices = torch.topk(fact_probs, k=args.max_facts_cap)
-                    # Create a mask for the capped set
-                    cap_mask = torch.zeros_like(selection_mask)
-                    cap_mask[top_cap_indices] = 1.0
-                    # Combine: only facts that are both in top-100 AND selected by STE
-                    selection_mask = selection_mask * cap_mask
-                
-                # Select facts where binary mask = 1 (variable size!)
-                # STE trick: selection_mask has gradient flow even though forward values are 0/1
-                selected_indices = (selection_mask > 0.5).nonzero(as_tuple=True)[0]
-                
-                if len(selected_indices) == 0:
-                    # Edge case: no facts selected - use top-1 as fallback
-                    selected_indices = torch.argmax(fact_probs, keepdim=True)
-                
-                # Get embeddings for selected facts only (not weighted - discrete selection)
-                selected_fact_embeds = fact_embeds[selected_indices]  # [num_selected, fact_dim]
-                
-                # Multiply by selection_mask values to maintain gradient flow via STE
-                # (The mask values are 1.0 but carry gradients through the STE trick)
-                selected_mask_values = selection_mask[selected_indices].unsqueeze(-1)
-                selected_fact_embeds = selected_fact_embeds * selected_mask_values
-                
-                # --- Project to Generator Space ---
-                neural_prompt_embeds = projector(selected_fact_embeds)  # [num_selected, generator_dim]
-                neural_prompt_embeds = neural_prompt_embeds.unsqueeze(0)  # [1, num_selected, generator_dim]
-                
-                # Convert to generator's dtype (bfloat16) for compatibility
-                # Gradients flow through this conversion automatically
-                neural_prompt_embeds = neural_prompt_embeds.to(dtype=torch.bfloat16)
+                for sample in micro:
+                    question = sample['question']
+                    answer = sample['answer']
+                    subgraph = sample['subgraph']
+                    rel_texts = sample['rel_texts']
+                    triples = sample.get('triples', [])
+                    retrieval_labels = sample['labels'].to(device)
 
-                # Build fact text list aligned to selected_indices (fact index == triple index).
-                selected_fact_texts = []
-                if triples:
-                    for idx in selected_indices.detach().cpu().tolist():
-                        if 0 <= idx < len(triples) and len(triples[idx]) >= 3:
-                            h, r, t = triples[idx][0], triples[idx][1], triples[idx][2]
-                            selected_fact_texts.append(f"{h}, {r}, {t}")
+                    if not answer:
+                        continue
+
+                    global_step += 1
+
+                    answer_supervised = answer
+                    if isinstance(answer, list):
+                        answer_supervised = " | ".join([str(a) for a in answer if str(a).strip()])
+
+                    # Relation embedding with cache
+                    with torch.no_grad():
+                        key = tuple(rel_texts) if rel_texts else None
+                        if key and key in rel_embed_cache:
+                            rel_embeds = rel_embed_cache[key].to(device)
                         else:
-                            selected_fact_texts.append("")
-                
-                # --- Generator Forward Pass ---
+                            if rel_texts and rel_texts[0]:
+                                rel_embeds = retriever.encode_relations(rel_texts).to(device)
+                            else:
+                                rel_embeds = torch.randn(len(rel_texts), args.relation_dim, device=device) * 0.02
+                            if key:
+                                rel_embed_cache[key] = rel_embeds.detach().cpu()
+
+                    edge_relations = rel_embeds[subgraph.edge_type]
+
+                    fact_probs, node_embeds, fact_embeds = retriever(
+                        node_features=subgraph.x,
+                        edge_index=subgraph.edge_index,
+                        edge_attr=edge_relations,
+                        edge_relations=edge_relations,
+                        questions=[question],
+                        fact_indices=None
+                    )
+
+                    fact_logits = torch.log(fact_probs + 1e-8) - torch.log(1 - fact_probs + 1e-8)
+                    selection_mask = sampler(fact_logits)
+
+                    num_facts = selection_mask.shape[0]
+                    if num_facts > args.max_facts_cap:
+                        _, top_cap_indices = torch.topk(fact_probs, k=args.max_facts_cap)
+                        cap_mask = torch.zeros_like(selection_mask)
+                        cap_mask[top_cap_indices] = 1.0
+                        selection_mask = selection_mask * cap_mask
+
+                    selected_indices = (selection_mask > 0.5).nonzero(as_tuple=True)[0]
+                    if len(selected_indices) == 0:
+                        selected_indices = torch.argmax(fact_probs, keepdim=True)
+
+                    selected_fact_embeds = fact_embeds[selected_indices]
+                    selected_mask_values = selection_mask[selected_indices].unsqueeze(-1)
+                    selected_fact_embeds = selected_fact_embeds * selected_mask_values
+
+                    neural_prompt_embeds = projector(selected_fact_embeds).unsqueeze(0)
+                    neural_prompt_embeds = neural_prompt_embeds.to(dtype=torch.bfloat16)
+
+                    selected_fact_texts = []
+                    if triples:
+                        for idx in selected_indices.detach().cpu().tolist():
+                            if 0 <= idx < len(triples) and len(triples[idx]) >= 3:
+                                h, r, t = triples[idx][0], triples[idx][1], triples[idx][2]
+                                selected_fact_texts.append(f"{h}, {r}, {t}")
+                            else:
+                                selected_fact_texts.append("")
+
+                    ret_loss, _, _ = retriever.compute_loss(fact_probs, retrieval_labels)
+
+                    questions_mb.append(question)
+                    answers_mb.append(answer_supervised)
+                    fact_texts_mb.append(selected_fact_texts)
+                    prompt_embeds_mb.append(neural_prompt_embeds)  # [1, K, H]
+                    ret_losses_mb.append(ret_loss)
+
+                if len(prompt_embeds_mb) == 0:
+                    continue
+
+                max_k = max(pe.shape[1] for pe in prompt_embeds_mb)
+                gen_dim = prompt_embeds_mb[0].shape[-1]
+                mb_size = len(prompt_embeds_mb)
+                batch_prompts = torch.zeros((mb_size, max_k, gen_dim), device=device, dtype=prompt_embeds_mb[0].dtype)
+                padded_fact_texts = []
+                for i, pe in enumerate(prompt_embeds_mb):
+                    k = pe.shape[1]
+                    batch_prompts[i, :k, :] = pe.squeeze(0)
+                    padded = fact_texts_mb[i] + [""] * (max_k - len(fact_texts_mb[i]))
+                    padded_fact_texts.append(padded)
+
                 try:
                     outputs = generator.forward_paper_prompt(
-                        neural_prompt_embeds, 
-                        questions=[question_prompt],
-                        fact_texts=[selected_fact_texts],
-                        answer_texts=[answer_supervised],
+                        batch_prompts,
+                        questions=questions_mb,
+                        fact_texts=padded_fact_texts,
+                        answer_texts=answers_mb,
                         eos_loss_weight=args.eos_loss_weight,
                     )
                     gen_loss = outputs.loss
                 except Exception as e:
                     print(f"Generator error: {e}")
                     continue
-                
-                # --- Retriever Auxiliary Loss (optional, helps with stability) ---
-                ret_loss, _, _ = retriever.compute_loss(fact_probs, retrieval_labels)
 
-                # --- Paper-aligned Gradient-Norm Balancing (Section 4.4, Appendix G) ---
-                # L = L_gen + rho * (||∇L_gen|| / ||∇L_ret||) * L_ret
-                #
-                # We compute gradient norms w.r.t. fact_probs as a proxy for retriever decision pressure.
-                # This is needed either for dynamic weighting OR for logging diagnostics.
-                #
-                # NOTE: With gradient checkpointing enabled, torch.autograd.grad() can error.
-                # We re-run a small generator forward with checkpointing disabled for the grad computation.
-                
-                grad_norm_info = None
-                dynamic_ret_weight = args.ret_loss_weight  # fallback to static weight
-                
-                # Compute gradient norms if: (1) using dynamic balancing, or (2) logging diagnostics
-                should_compute_grad_norms = args.use_grad_norm_balance or (
-                    args.log_grad_norms and (global_step % args.grad_norm_log_interval == 0)
+                ret_loss_mean = torch.stack(ret_losses_mb).mean() if len(ret_losses_mb) > 0 else torch.tensor(0.0, device=device)
+
+                loss = gen_loss + args.ret_loss_weight * ret_loss_mean
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(retriever.parameters()) + list(projector.parameters()),
+                    max_norm=1.0
                 )
-                
-                if should_compute_grad_norms:
-                    try:
-                        # 1) Retriever supervision gradient w.r.t fact_probs (cheap, no generator involved)
-                        g_ret = torch.autograd.grad(
-                            ret_loss,
-                            fact_probs,
-                            retain_graph=True,
-                            allow_unused=True,
-                        )[0]
+                optimizer.step()
 
-                        # 2) Generation gradient w.r.t fact_probs
-                        # Re-run generator forward with gradient checkpointing disabled to avoid
-                        # torch.utils.checkpoint + autograd.grad incompatibility.
-                        ckpt_was_enabled = bool(getattr(generator.model, "is_gradient_checkpointing", False))
-                        if ckpt_was_enabled and hasattr(generator.model, "gradient_checkpointing_disable"):
-                            generator.model.gradient_checkpointing_disable()
-                        try:
-                            outputs_diag = generator.forward_paper_prompt(
-                                neural_prompt_embeds,
-                                questions=[question_prompt],
-                                fact_texts=[selected_fact_texts],
-                                answer_texts=[answer_supervised],
-                                eos_loss_weight=args.eos_loss_weight,
-                            )
-                            gen_loss_diag = outputs_diag.loss
-                        finally:
-                            if ckpt_was_enabled and hasattr(generator.model, "gradient_checkpointing_enable"):
-                                generator.model.gradient_checkpointing_enable()
+                batch_loss_acc += loss.item()
+                batch_gen_acc += gen_loss.item()
+                batch_ret_acc += ret_loss_mean.item()
+                mb_count += 1
 
-                        g_gen = torch.autograd.grad(
-                            gen_loss_diag,
-                            fact_probs,
-                            retain_graph=True,
-                            allow_unused=True,
-                        )[0]
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'gen': f'{gen_loss.item():.4f}',
+                    'ret': f'{ret_loss_mean.item():.4f}',
+                    'lr': f"{optimizer.param_groups[1]['lr']:.2e}",
+                })
 
-                        gen_norm = float(g_gen.norm().detach().cpu()) if g_gen is not None else 0.0
-                        ret_norm = float(g_ret.norm().detach().cpu()) if g_ret is not None else 0.0
-                        ratio = gen_norm / (ret_norm + 1e-12)
-                        grad_norm_info = (gen_norm, ret_norm, ratio)
-                        
-                        # Paper-aligned dynamic weight: rho * (||∇L_gen|| / ||∇L_ret||)
-                        if args.use_grad_norm_balance:
-                            dynamic_ret_weight = args.rho * ratio
-                            
-                    except Exception as e:
-                        # Never break training because of grad norm computation.
-                        grad_norm_info = ("error", repr(e))
-                        # Fall back to static weight if gradient computation fails
-                        if args.use_grad_norm_balance:
-                            dynamic_ret_weight = args.ret_loss_weight
-                
-                # --- Combined Loss ---
-                # Generator loss + dynamically (or statically) weighted retriever loss
-                loss = gen_loss + dynamic_ret_weight * ret_loss
-                
-                batch_loss += loss
-                batch_gen_loss += gen_loss.item()
-                batch_ret_loss += ret_loss.item()
-                batch_samples += 1
-
-                # Occasionally print gradient-norm diagnostics to logs (high-signal for imbalance).
-                if grad_norm_info is not None:
-                    if isinstance(grad_norm_info, tuple) and len(grad_norm_info) == 3:
-                        gn, rn, rr = grad_norm_info
-                        weight_str = f"dynamic_w={dynamic_ret_weight:.3e}" if args.use_grad_norm_balance else f"static_w={args.ret_loss_weight}"
-                        print(
-                            f"[grad_norms@step={global_step}] "
-                            f"||dL_gen/dprobs||={gn:.3e} "
-                            f"||dL_ret/dprobs||={rn:.3e} "
-                            f"ratio={rr:.3e} "
-                            f"{weight_str}"
-                        )
-                        # Also reflect in tqdm when available (compact).
-                        postfix_dict = {
-                            'loss': f'{(batch_loss/batch_samples).item():.4f}' if batch_samples else 'nan',
-                            'gen': f'{batch_gen_loss/batch_samples:.4f}' if batch_samples else 'nan',
-                            'ret': f'{batch_ret_loss/batch_samples:.4f}' if batch_samples else 'nan',
-                            'gG': f'{gn:.1e}',
-                            'gR': f'{rn:.1e}',
-                            'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
-                        }
-                        if args.use_grad_norm_balance:
-                            postfix_dict['ρw'] = f'{dynamic_ret_weight:.2e}'
-                        pbar.set_postfix(postfix_dict)
-                    else:
-                        print(f"[grad_norms@step={global_step}] WARNING: {grad_norm_info}")
-            
-            if batch_samples == 0:
+            if mb_count == 0:
                 continue
-            
-            # Average and backprop
-            batch_loss = batch_loss / batch_samples
-            
-            optimizer.zero_grad()
-            batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(retriever.parameters()) + list(projector.parameters()),
-                max_norm=1.0
-            )
-            optimizer.step()
-            
-            epoch_loss += batch_loss.item()
-            epoch_gen_loss += batch_gen_loss / batch_samples
-            epoch_ret_loss += batch_ret_loss / batch_samples
+
+            epoch_loss += batch_loss_acc / mb_count
+            epoch_gen_loss += batch_gen_acc / mb_count
+            epoch_ret_loss += batch_ret_acc / mb_count
             num_batches += 1
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f'{batch_loss.item():.4f}',
-                'gen': f'{batch_gen_loss/batch_samples:.4f}',
-                'ret': f'{batch_ret_loss/batch_samples:.4f}',
-                # Show "main" LR (projector/generator). Retriever is 10x lower by design.
-                'lr': f"{optimizer.param_groups[1]['lr']:.2e}",
-            })
         
         # Epoch statistics
         avg_loss = epoch_loss / max(num_batches, 1)
@@ -935,6 +847,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--val_log_samples", type=int, default=3,
                         help="Log N example predictions during validation (0 to disable)")
+
+    # Efficiency knob: microbatch the generator forward pass
+    parser.add_argument(
+        "--generator_microbatch",
+        type=int,
+        default=4,
+        help="Process this many samples at a time in the generator forward pass. "
+             "Larger values reduce Python overhead; keep small enough to fit GPU memory.",
+    )
 
     # Diagnostics: gradient-norm imbalance probe (paper-style weighting insight)
     parser.add_argument(
