@@ -199,7 +199,8 @@ def generate_heuristics(input_path: Path, output_path: Path, limit_triples: int 
     # Stats
     print()
     print("=" * 60)
-    print(f"✓ Generated {len(heuristics)} heuristics from CWQ file: {input_path.name}")
+    # NOTE: Keep logs ASCII-only for Windows consoles (cp1252) to avoid UnicodeEncodeError.
+    print(f"OK: Generated {len(heuristics)} heuristics from CWQ file: {input_path.name}")
     print()
     print("To train Phase 1 (retriever warmup):")
     print("  python -m src.trainer.train_phase1 \\")
