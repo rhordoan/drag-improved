@@ -299,7 +299,9 @@ def train_phase2(args):
         batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=collate_fn_train,
-        num_workers=0
+        num_workers=args.num_workers,
+        pin_memory=True if args.num_workers > 0 else False,
+        persistent_workers=True if args.num_workers > 0 else False,
     )
     
     # 2b. Optional validation set
@@ -320,7 +322,9 @@ def train_phase2(args):
             batch_size=args.batch_size,
             shuffle=False,
             collate_fn=collate_fn_val,
-            num_workers=0
+            num_workers=args.num_workers,
+            pin_memory=True if args.num_workers > 0 else False,
+            persistent_workers=True if args.num_workers > 0 else False,
     )
     
     # 3. Initialize Retriever and load Phase 1 checkpoint
@@ -847,6 +851,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--val_log_samples", type=int, default=3,
                         help="Log N example predictions during validation (0 to disable)")
+
+    # DataLoader workers (CPU parallelism)
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes for loading/building per-sample subgraphs. "
+             "Set >0 to use multiple CPU cores (each worker has its own cache/state).",
+    )
 
     # Efficiency knob: microbatch the generator forward pass
     parser.add_argument(
