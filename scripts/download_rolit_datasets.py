@@ -13,10 +13,99 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _detokenize_with_offsets(tokens: List[str]) -> Tuple[str, List[Tuple[int, int]]]:
+    """
+    Deterministic detokenizer that also returns token (start,end) offsets in the produced text.
+    Good enough for producing stable span offsets from HF token classification datasets.
+    """
+    no_space_before = {".", ",", ";", ":", "!", "?", ")", "]", "}", "»", "”"}
+    no_space_after = {"(", "[", "{", "«", "„", "“"}
+
+    offsets: List[Tuple[int, int]] = []
+    cur = ""
+    for tok in tokens:
+        tok = "" if tok is None else str(tok)
+        if not tok:
+            offsets.append((len(cur), len(cur)))
+            continue
+
+        add_space = True
+        if not cur:
+            add_space = False
+        elif tok in no_space_before:
+            add_space = False
+        elif cur and cur[-1] in (" ", "\n"):
+            add_space = False
+        elif any(cur.endswith(ch) for ch in no_space_after):
+            add_space = False
+
+        if add_space:
+            cur += " "
+
+        start = len(cur)
+        cur += tok
+        end = len(cur)
+        offsets.append((start, end))
+
+    return cur, offsets
+
+
+def _extract_spans_from_bio(
+    *,
+    text: str,
+    token_offsets: List[Tuple[int, int]],
+    labels: List[str],
+) -> List[Dict[str, object]]:
+    """
+    Convert BIO-like per-token labels (e.g., B-PER/I-PER/O) into char-offset spans.
+    """
+    spans: List[Dict[str, object]] = []
+    cur_label: Optional[str] = None
+    cur_start: Optional[int] = None
+    cur_end: Optional[int] = None
+
+    def flush():
+        nonlocal cur_label, cur_start, cur_end
+        if cur_label and cur_start is not None and cur_end is not None and cur_end > cur_start:
+            spans.append(
+                {
+                    "start_char": int(cur_start),
+                    "end_char": int(cur_end),
+                    "label": cur_label,
+                    "surface": text[cur_start:cur_end],
+                }
+            )
+        cur_label, cur_start, cur_end = None, None, None
+
+    for i, lab in enumerate(labels):
+        lab = (lab or "O").strip()
+        if lab == "O" or lab == "":
+            flush()
+            continue
+
+        if "-" in lab:
+            prefix, ent = lab.split("-", 1)
+        else:
+            prefix, ent = "B", lab
+        prefix = prefix.upper()
+        ent = ent.strip().upper()
+
+        s, e = token_offsets[i]
+        if prefix == "B" or cur_label != ent:
+            flush()
+            cur_label = ent
+            cur_start, cur_end = s, e
+        else:
+            cur_end = e
+
+    flush()
+    return spans
 
 
 def download_ro_stories(output_dir: Path, limit: Optional[int] = None):
@@ -162,6 +251,7 @@ def download_histnero(output_dir: Path, limit: Optional[int] = None):
             "histnero/dataset",
             "readerbench/histnero",
             "dumitrescustefan/histnero",
+            "avramandrei/histnero",
         ]
         
         dataset = None
@@ -185,13 +275,13 @@ def download_histnero(output_dir: Path, limit: Optional[int] = None):
                     "text": "În anul 1600, Mihai Viteazul a unit pentru prima oară cele trei țări românești: Țara Românească, Moldova și Transilvania. Domnitorul Mihai a fost întâmpinat cu mare bucurie de boierii din Brașov și Alba Iulia.",
                     "year": 1647,
                     "source": "Letopisețul Țării Moldovei",
-                    "entities": [
-                        {"text": "Mihai Viteazul", "type": "Person", "start": 13, "end": 27},
-                        {"text": "Țara Românească", "type": "Location", "start": 75, "end": 90},
-                        {"text": "Moldova", "type": "Location", "start": 92, "end": 99},
-                        {"text": "Transilvania", "type": "Location", "start": 104, "end": 116},
-                        {"text": "Brașov", "type": "Location", "start": 183, "end": 189},
-                        {"text": "Alba Iulia", "type": "Location", "start": 194, "end": 204},
+                    "spans": [
+                        {"start_char": 13, "end_char": 27, "label": "PER", "surface": "Mihai Viteazul"},
+                        {"start_char": 75, "end_char": 90, "label": "LOC", "surface": "Țara Românească"},
+                        {"start_char": 92, "end_char": 99, "label": "LOC", "surface": "Moldova"},
+                        {"start_char": 104, "end_char": 116, "label": "LOC", "surface": "Transilvania"},
+                        {"start_char": 183, "end_char": 189, "label": "LOC", "surface": "Brașov"},
+                        {"start_char": 194, "end_char": 204, "label": "LOC", "surface": "Alba Iulia"},
                     ]
                 },
                 {
@@ -200,12 +290,12 @@ def download_histnero(output_dir: Path, limit: Optional[int] = None):
                     "text": "Ștefan cel Mare a domnit în Moldova timp de 47 de ani. A câștigat multe bătălii împotriva otomanilor, polonezilor și ungurilor. A construit 44 de mănăstiri și biserici, dintre care cele mai faimoase sunt Voroneț, Putna și Suceava.",
                     "year": 1504,
                     "source": "Cronica Moldovei",
-                    "entities": [
-                        {"text": "Ștefan cel Mare", "type": "Person", "start": 0, "end": 15},
-                        {"text": "Moldova", "type": "Location", "start": 30, "end": 37},
-                        {"text": "Voroneț", "type": "Location", "start": 207, "end": 214},
-                        {"text": "Putna", "type": "Location", "start": 216, "end": 221},
-                        {"text": "Suceava", "type": "Location", "start": 226, "end": 233},
+                    "spans": [
+                        {"start_char": 0, "end_char": 15, "label": "PER", "surface": "Ștefan cel Mare"},
+                        {"start_char": 30, "end_char": 37, "label": "LOC", "surface": "Moldova"},
+                        {"start_char": 207, "end_char": 214, "label": "LOC", "surface": "Voroneț"},
+                        {"start_char": 216, "end_char": 221, "label": "LOC", "surface": "Putna"},
+                        {"start_char": 226, "end_char": 233, "label": "LOC", "surface": "Suceava"},
                     ]
                 },
                 {
@@ -214,10 +304,10 @@ def download_histnero(output_dir: Path, limit: Optional[int] = None):
                     "text": "În anul 1595 a avut loc bătălia de la Călugăreni între oastea lui Mihai Viteazul și armatele otomane conduse de Sinan Pașa. Românii au obținut o victorie strălucită, deși erau în inferioritate numerică.",
                     "year": 1595,
                     "source": "Analele Țării Românești",
-                    "entities": [
-                        {"text": "Călugăreni", "type": "Location", "start": 38, "end": 48},
-                        {"text": "Mihai Viteazul", "type": "Person", "start": 67, "end": 81},
-                        {"text": "Sinan Pașa", "type": "Person", "start": 114, "end": 124},
+                    "spans": [
+                        {"start_char": 38, "end_char": 48, "label": "LOC", "surface": "Călugăreni"},
+                        {"start_char": 67, "end_char": 81, "label": "PER", "surface": "Mihai Viteazul"},
+                        {"start_char": 114, "end_char": 124, "label": "PER", "surface": "Sinan Pașa"},
                     ]
                 },
             ]
@@ -232,29 +322,96 @@ def download_histnero(output_dir: Path, limit: Optional[int] = None):
             logger.info(f"Created {len(sample_docs[:limit] if limit else sample_docs)} sample HistNERo documents in {output_file}")
             return output_file
         
-        # Process dataset
+        # Process dataset (token classification → our doc+spans JSONL)
         output_file = output_dir / "histnero_full.jsonl"
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        split_name = 'train' if 'train' in dataset else list(dataset.keys())[0]
-        docs = dataset[split_name]
-        
+
+        # Determine label names for ner_tags (Sequence(ClassLabel))
+        label_names = None
+        try:
+            any_split = list(dataset.keys())[0]
+            ner_feat = dataset[any_split].features.get("ner_tags")
+            if hasattr(ner_feat, "feature") and hasattr(ner_feat.feature, "names"):
+                label_names = list(ner_feat.feature.names)
+        except Exception:
+            label_names = None
+
+        # Combine splits if present
+        split_order = [s for s in ("train", "validation", "valid", "test") if s in dataset]
+        if not split_order:
+            split_order = list(dataset.keys())
+
+        grouped_text: Dict[str, str] = {}
+        grouped_spans: Dict[str, List[Dict[str, object]]] = {}
+        grouped_meta: Dict[str, Dict[str, object]] = {}
+
+        for split_name in split_order:
+            ds = dataset[split_name]
+            for row in ds:
+                doc_id = row.get("doc_id") or row.get("id") or "histnero_unknown"
+                doc_id = str(doc_id)
+
+                tokens = row.get("tokens") or []
+                tags = row.get("ner_tags") or []
+                if not isinstance(tokens, list) or not isinstance(tags, list) or len(tokens) != len(tags):
+                    continue
+
+                sent_text, token_offsets = _detokenize_with_offsets([str(t) for t in tokens])
+
+                labs: List[str] = []
+                for t in tags:
+                    if isinstance(t, int) and label_names and 0 <= t < len(label_names):
+                        labs.append(label_names[t])
+                    else:
+                        labs.append(str(t))
+
+                sent_spans = _extract_spans_from_bio(text=sent_text, token_offsets=token_offsets, labels=labs)
+
+                prev = grouped_text.get(doc_id, "")
+                sep = "\n" if prev else ""
+                base = len(prev) + len(sep)
+                grouped_text[doc_id] = prev + sep + sent_text
+                grouped_spans.setdefault(doc_id, [])
+                for s in sent_spans:
+                    grouped_spans[doc_id].append(
+                        {
+                            "start_char": int(s["start_char"]) + base,
+                            "end_char": int(s["end_char"]) + base,
+                            "label": s["label"],
+                            "surface": s["surface"],
+                        }
+                    )
+
+                grouped_meta.setdefault(doc_id, {})
+                if "region" in row and row.get("region") is not None:
+                    grouped_meta[doc_id]["region"] = row.get("region")
+                if "id" in row and row.get("id") is not None:
+                    grouped_meta[doc_id].setdefault("row_ids", [])
+                    # keep small; don't explode metadata
+                    if len(grouped_meta[doc_id]["row_ids"]) < 50:
+                        grouped_meta[doc_id]["row_ids"].append(str(row.get("id")))
+
+        doc_ids_sorted = sorted(grouped_text.keys())
         if limit:
-            docs = docs.select(range(min(limit, len(docs))))
-        
+            doc_ids_sorted = doc_ids_sorted[: int(limit)]
+
         with open(output_file, 'w', encoding='utf-8') as f:
-            for i, item in enumerate(docs):
-                doc = {
-                    "doc_id": item.get("id", f"hist_{i:05d}"),
-                    "title": item.get("title", f"Document {i}"),
-                    "text": item.get("text", item.get("content", "")),
-                    "year": item.get("year"),
-                    "source": item.get("source", "Unknown"),
-                    "entities": item.get("entities", []),
-                }
-                f.write(json.dumps(doc, ensure_ascii=False) + '\n')
-        
-        logger.info(f"Downloaded {len(docs)} HistNERo documents to {output_file}")
+            for did in doc_ids_sorted:
+                f.write(
+                    json.dumps(
+                        {
+                            "doc_id": did,
+                            "title": did,
+                            "text": grouped_text[did],
+                            "spans": grouped_spans.get(did, []),
+                            "meta": grouped_meta.get(did, {}),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        logger.info(f"Downloaded {len(doc_ids_sorted)} HistNERo documents to {output_file}")
         return output_file
         
     except ImportError:
