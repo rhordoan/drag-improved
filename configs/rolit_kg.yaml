@@ -1,0 +1,54 @@
+run_name: "rolitkg_mvp"
+
+# Where the run writes artifacts. You can also pass --output_dir to override.
+output_dir: "data/processed/rolit_kg/rolitkg_mvp"
+
+ro_stories:
+  # Offline default (included in repo):
+  path_jsonl: "data/rolit_kg_sample/ro_stories_sample.jsonl"
+
+  # Online option (HF):
+  # hf_dataset: "YOUR_HF_DATASET_NAME"
+  # hf_split: "train"
+  # hf_revision: null
+  # text_field: "text"
+  # title_field: "title"
+  # author_field: "author"
+  # limit: 50
+
+histnero:
+  # Offline default (included in repo):
+  path_jsonl: "data/rolit_kg_sample/histnero_sample.jsonl"
+  # limit: 200
+
+chunking:
+  # Keep small for MVP/sample runs.
+  target_tokens: 250
+  overlap_tokens: 40
+  # Optional: tokenizer model for token-based chunking.
+  # tokenizer_model: "xlm-roberta-base"
+  tokenizer_model: null
+
+extraction:
+  # MVP default: no external models required.
+  ner_engine: "regex"  # "regex" | "transformers"
+  # ner_model: "Davlan/xlm-roberta-base-ner-hrl"
+  relations_engine: "heuristic"
+
+resolution:
+  # Keep RO-Stories and HistNERo separate, then ground across corpora.
+  scope: "per_source"  # "per_source" | "global" | "per_doc"
+  min_norm_len: 2
+
+audit:
+  n: 80
+  seed: 42
+
+neo4j:
+  enabled: false
+  uri: "neo4j://localhost:7687"
+  user: "neo4j"
+  password: "password"
+  database: null
+  batch_size: 2000
+

@@ -1,0 +1,2 @@
+{"doc_id":"histnero_001","title":"Cronica orașelor","text":"În anul 1918, Ion Ionescu a locuit în Cluj. Mai târziu, Maria Popescu s-a mutat la Sibiu.","spans":[{"start_char":14,"end_char":18,"label":"DATE","surface":"1918"},{"start_char":20,"end_char":31,"label":"PER","surface":"Ion Ionescu"},{"start_char":44,"end_char":48,"label":"LOC","surface":"Cluj"},{"start_char":61,"end_char":74,"label":"PER","surface":"Maria Popescu"},{"start_char":90,"end_char":95,"label":"LOC","surface":"Sibiu"}]}
+

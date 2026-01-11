@@ -61,3 +61,20 @@ Thumbs.db
 data/kg/
 data/*.zip
 *.tar.gz
+
+# RoLit-KG pipeline outputs
+data/processed/
+data/*_full.jsonl
+outputs/
+logs/
+
+# Default: don't commit datasets; keep only tiny samples
+data/*
+!data/rolit_kg_sample/
+!data/rolit_kg_sample/*.jsonl
+
+# LaTeX build artifacts (we keep the .tex/.pdf)
+docs/*.aux
+docs/*.bbl
+docs/*.out
+docs/*.toc
