@@ -816,6 +816,7 @@ def extract_for_documents(
     llm_timeout_s: int = 60,
     cache_dir: Optional[str] = None,
     relations_cache_only: bool = False,
+    relations_fallback_heuristic: bool = False,
 ) -> Tuple[List[Mention], List[Entity], List[Relation]]:
     mentions_all: List[Mention] = []
     entities_all: List[Entity] = []
@@ -850,7 +851,7 @@ def extract_for_documents(
                         raise ValueError("llm_base_url and llm_model must be set when relations_engine='ollama'")
                     cur_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
                     ctx = prev_chunk_text if (prev_chunk_text and prev_chunk_norms and (cur_norms & prev_chunk_norms)) else None
-                    relations_all.extend(
+                    rels_llm = (
                         extract_relations_ollama(
                             doc=doc,
                             chunk=ch,
@@ -863,6 +864,12 @@ def extract_for_documents(
                             cache_only=relations_cache_only,
                         )
                     )
+                    if rels_llm:
+                        relations_all.extend(rels_llm)
+                    elif relations_fallback_heuristic:
+                        # If cache-only is enabled (or LLM fails), we still want a usable KG.
+                        # This gives you coverage everywhere, while keeping cached LLM edges where available.
+                        relations_all.extend(extract_relations_heuristic(doc=doc, chunk=ch, mentions=mentions))
                 prev_chunk_text = ch.text
                 prev_chunk_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
                 processed_chunks += 1

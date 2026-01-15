@@ -142,6 +142,11 @@ def parse_args():
         action="store_true",
         help="If set (and --relations_engine ollama), ONLY use cached LLM relations; skip LLM calls on cache miss.",
     )
+    parser.add_argument(
+        "--relations_fallback_heuristic",
+        action="store_true",
+        help="If set (and --relations_engine ollama), fall back to heuristic relations when no cached/LLM relations are available for a chunk.",
+    )
 
     # Output
     parser.add_argument("--output_dir", type=str, default=None)
@@ -494,6 +499,7 @@ def main():
             llm_timeout_s=args.ollama_rel_timeout_s if args.relations_engine == "ollama" else 60,
             cache_dir=args.cache_dir,
             relations_cache_only=bool(args.relations_cache_only),
+            relations_fallback_heuristic=bool(args.relations_fallback_heuristic),
         )
     except ExtractionInterrupted as e:
         mentions, entities, relations = e.mentions, e.entities, e.relations
