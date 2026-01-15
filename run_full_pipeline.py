@@ -35,7 +35,7 @@ from src.pipeline.common import (
 from src.pipeline.ingest import load_documents_from_jsonl, load_ro_stories_from_hf
 from src.pipeline.normalize import normalize_documents
 from src.pipeline.chunking import chunk_document
-from src.pipeline.extract import extract_for_documents
+from src.pipeline.extract import ExtractionInterrupted, extract_for_documents
 from src.pipeline.validate import validate_artifacts
 from src.pipeline.ground import ground_across_corpora_exact
 from src.pipeline.neo4j_load import build_graph_records, write_cypher_files
@@ -136,6 +136,11 @@ def parse_args():
         type=str,
         default=None,
         help="Optional cache directory for incremental rebuilds (LLM relation cache, etc.).",
+    )
+    parser.add_argument(
+        "--relations_cache_only",
+        action="store_true",
+        help="If set (and --relations_engine ollama), ONLY use cached LLM relations; skip LLM calls on cache miss.",
     )
 
     # Output
@@ -477,17 +482,44 @@ def main():
     
     rel_llm_model = args.ollama_rel_model or args.ollama_model
 
-    mentions, entities, relations = extract_for_documents(
-        docs,
-        doc_chunks,
-        ner_engine=args.ner_engine,
-        ner_model=args.ner_model if args.ner_engine in ("transformers", "ensemble") else None,
-        relations_engine=args.relations_engine,
-        llm_base_url=args.ollama_url if args.relations_engine == "ollama" else None,
-        llm_model=rel_llm_model if args.relations_engine == "ollama" else None,
-        llm_timeout_s=args.ollama_rel_timeout_s if args.relations_engine == "ollama" else 60,
-        cache_dir=args.cache_dir,
-    )
+    try:
+        mentions, entities, relations = extract_for_documents(
+            docs,
+            doc_chunks,
+            ner_engine=args.ner_engine,
+            ner_model=args.ner_model if args.ner_engine in ("transformers", "ensemble") else None,
+            relations_engine=args.relations_engine,
+            llm_base_url=args.ollama_url if args.relations_engine == "ollama" else None,
+            llm_model=rel_llm_model if args.relations_engine == "ollama" else None,
+            llm_timeout_s=args.ollama_rel_timeout_s if args.relations_engine == "ollama" else 60,
+            cache_dir=args.cache_dir,
+            relations_cache_only=bool(args.relations_cache_only),
+        )
+    except ExtractionInterrupted as e:
+        mentions, entities, relations = e.mentions, e.entities, e.relations
+        logger.warning(
+            "Extraction interrupted after %d chunks (last doc=%s chunk=%s). Writing raw checkpoint and exiting...",
+            e.processed_chunks,
+            e.last_doc_id,
+            e.last_chunk_id,
+        )
+
+        # Best-effort validation + checkpoint so users can stop long runs safely.
+        val_report = validate_artifacts(mentions=mentions, entities=entities, relations=relations)
+        val_report["interrupted"] = True
+        val_report["interrupted_at"] = {"doc_id": e.last_doc_id, "chunk_id": e.last_chunk_id}
+        val_report["processed_chunks"] = e.processed_chunks
+
+        _write_raw_checkpoint(
+            out_dir=out_dir,
+            docs=docs,
+            doc_chunks=doc_chunks,
+            mentions=mentions,
+            entities=entities,
+            relations=relations,
+            val_report=val_report,
+        )
+        return
     
     elapsed_extract = time.time() - start_extract
     logger.info(f"Extracted {len(mentions)} mentions, {len(entities)} entities, {len(relations)} relations")

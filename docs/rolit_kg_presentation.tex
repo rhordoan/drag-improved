@@ -1,0 +1,482 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  backgroundcolor=\color{black!2},
+}
+
+\title[D-RAG \& RoLit-KG]{D-RAG \& RoLit-KG: Advanced Knowledge Graph Systems\\KGQA + Romanian Literary KG Construction}
+\author[Hordoan \& Deaconu Bogdan]{\texorpdfstring{Roberto Hordoan\\{\small D-RAG (KGQA)} \and Mihai Deaconu Bogdan\\{\small KGC / RoLit-KG pipeline}}{Roberto Hordoan; Mihai Deaconu Bogdan}}
+\institute{Work split: D-RAG (Roberto Hordoan) \textbullet\ KGC (Mihai Deaconu Bogdan)}
+\date{\today}
+
+% Keep PDF metadata clean (avoid linebreak tokens in author/title strings)
+\hypersetup{
+  pdfauthor={Roberto Hordoan; Mihai Deaconu Bogdan},
+  pdftitle={D-RAG \& RoLit-KG: Advanced Knowledge Graph Systems},
+}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Goal (10 minutes)}
+  \begin{itemize}
+    \item Present two complementary systems:
+      \begin{itemize}
+        \item \textbf{D-RAG}: differentiable retrieval-augmented generation for KGQA
+        \item \textbf{RoLit-KG}: production pipeline to build a Romanian literary KG in Neo4j
+      \end{itemize}
+    \item Show how they connect: \textbf{KG construction} \textrightarrow \textbf{KGQA}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Agenda}
+  \begin{enumerate}
+    \item D-RAG: problem, architecture, results, how to reproduce
+    \item RoLit-KG: datasets, pipeline, schema/QC, scaling, results
+    \item Integration: using RoLit-KG as a knowledge source for D-RAG-style QA
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Work split (credits)}
+  \begin{itemize}
+    \item \textbf{D-RAG (KGQA)}: Roberto Hordoan
+      \begin{itemize}
+        \item Retriever + sampler + generator integration, training pipeline, results + analysis
+      \end{itemize}
+    \item \textbf{KGC / RoLit-KG (KG construction)}: Mihai Deaconu Bogdan
+      \begin{itemize}
+        \item Data ingestion, extraction, entity resolution, graph QC, Neo4j export + analytics
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+% ===========================
+% D-RAG (KGQA) SECTION
+% ===========================
+\begin{frame}{D-RAG: the KGQA problem}
+  \begin{itemize}
+    \item Task: answer a natural-language question using evidence from a knowledge graph
+    \item Standard RAG limitation:
+      \begin{itemize}
+        \item retrieval is \textbf{discrete} (select a subgraph), breaking end-to-end gradients
+      \end{itemize}
+    \item D-RAG goal: make retrieval \textbf{trainable with the generator loss}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{D-RAG: core idea (differentiable retrieval)}
+  \begin{itemize}
+    \item \textbf{Retriever (GNN)} assigns a selection probability per fact/triple
+    \item \textbf{Sampler} uses \textbf{Gumbel-Softmax (straight-through)} to pick facts while preserving gradients
+    \item \textbf{Differentiable prompting} injects selected graph embeddings into the LLM latent space
+    \item Generator trains to answer; retriever trains to reduce noise while keeping recall
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{D-RAG: implementation highlights in this repo}
+  \begin{itemize}
+    \item Retriever: ReaRev-style instruction-conditioned GNN (\texttt{src/model/retriever.py})
+    \item Sampler: Independent Binary Gumbel-Softmax (\texttt{src/model/sampler.py})
+    \item Generator: Nemotron-3-Nano-30B with LoRA + differentiable prompting (\texttt{src/model/generator.py})
+    \item Training schedule: Phase 1 pre-train (10 epochs) + Phase 2 joint (20 epochs)
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{D-RAG: Implementation Challenges (Beyond the Paper)}
+  \begin{itemize}
+    \item \textbf{Hybrid Architecture Compatibility}:
+      \begin{itemize}
+        \item We used \textbf{Nemotron-3-Nano-30B} (Mamba/Transformer hybrid) instead of Llama-3 (standard Transformer).
+        \item \emph{The Issue}: Standard HuggingFace \texttt{generate()} functions failed (produced empty/garbage outputs) when injecting continuous graph embeddings into the hybrid architecture.
+        \item \emph{The Fix}: We engineered a \textbf{custom greedy decoding loop} to manually handle autoregressive generation with \texttt{inputs\_embeds}.
+      \end{itemize}
+    \item \textbf{Training Stability \& Optimization}:
+      \begin{itemize}
+        \item \textbf{Loss Balancing}: The paper's \texttt{GradNorm} approach proved unstable in our mixed-precision setup. We achieved convergence using a robust \textbf{static weight} ($\lambda=0.1$).
+        \item \textbf{LoRA Adapters}: Essential for the 30B parameter model (Rank=64, $\alpha$=128); the paper implied full fine-tuning which was infeasible for this scale.
+        \item \textbf{Hard Capping}: Added a strictly enforced \textbf{top-100 fact cap} before the Gumbel-Softmax step to prevent OOM errors on dense heuristic subgraphs.
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Phase 1 supervision: ``heuristics'' subgraphs (CWQ)}
+  \begin{itemize}
+    \item Phase 1 pre-trains the retriever using \textbf{per-question subgraphs}
+    \item We build training targets from \textbf{heuristic paths} on the gold subgraph:
+      \begin{itemize}
+        \item Input: RoG-CWQ provides a per-question \texttt{graph} (triples), plus \texttt{q\_entity}/\texttt{a\_entity}
+        \item We cap triples per example (default \texttt{--limit\_triples 50}) for speed/memory
+        \item Construct an undirected adjacency and run BFS up to 4 hops to find q\textrightarrow a paths
+        \item If no path is found: fallback to a few 1-hop edges touching seed entities (q/a)
+      \end{itemize}
+    \item Edge labeling idea:
+      \begin{itemize}
+        \item a triple is labeled positive iff it matches consecutive entity pairs along any path
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Undocumented Implementation Details: ``Solving the Black Box''}
+  The paper describes \textit{what} to do (heuristic supervision) but not \textit{how} to engineer it robustly. We had to devise specific algorithms:
+
+  \begin{itemize}
+    \item \textbf{1. Heuristic Label Construction (The ``Pathfinding'' Algorithm)}:
+      \begin{itemize}
+        \item \emph{Paper}: ``heuristic subgraphs are extracted via SPARQL query parsing'' \texttt{[cite: 240]}.
+        \item \emph{Our Implementation}:
+          \begin{itemize}
+            \item Parsed the gold subgraph into an undirected adjacency structure.
+            \item Ran \textbf{BFS (up to 4 hops)} between \texttt{q\_entity} and \texttt{a\_entity}.
+            \item \textbf{Crucial fallback}: If BFS finds no paths (disconnected subgraphs), we label 1-hop neighbors of seed entities as ``positive'' to prevent zero-positive / zero-signal steps.
+          \end{itemize}
+      \end{itemize}
+
+    \item \textbf{2. Projector Architecture}:
+      \begin{itemize}
+        \item \emph{Paper}: Mentions a ``projector'' mapping GNN to LLM space \texttt{[cite: 193]}.
+        \item \emph{Our Implementation}: a 2-layer MLP (\texttt{Linear} $\to$ \texttt{ReLU} $\to$ \texttt{Linear}) mapping $D_{\mathrm{GNN}} \to D_{\mathrm{LLM}}$ for Nemotron-30B ($D_{\mathrm{LLM}}=2688$).
+      \end{itemize}
+
+    \item \textbf{3. Dynamic Context Capping}:
+      \begin{itemize}
+        \item \emph{Paper}: silent on memory management for dense graphs.
+        \item \emph{Our Implementation}: enforced hard caps for safety (50 triples per example in Phase 1 heuristics generation; top-100 fact cap in Phase 2 inference/training).
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Heuristics generation: what we actually write to JSONL}
+  \begin{itemize}
+    \item We generate \texttt{data/train\_heuristics\_cwq\_train.jsonl} from a RoG-CWQ split:
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+python scripts/generate_cwq_heuristics.py \
+  --input data/cwq/ComplexWebQuestions_train.json \
+  --output data/train_heuristics_cwq_train.jsonl \
+  --limit_triples 50
+  \end{lstlisting}
+  \vspace{0.4em}
+  \begin{itemize}
+    \item Each line includes (minimum):
+      \begin{itemize}
+        \item \texttt{question: str}
+        \item \texttt{triples: [[head, rel, tail], ...]} (capped)
+        \item \texttt{paths: [[e0, e1, ...], ...]} (entity sequences)
+        \item \texttt{answer: str|[str]} and \texttt{graph\_size}
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Dataset shape (CWQ) and training time}
+  \begin{itemize}
+    \item \textbf{CWQ (ComplexWebQuestions)}:
+      \begin{itemize}
+        \item multi-hop KGQA questions with per-question gold subgraphs (RoG-CWQ format)
+        \item fields we consume for heuristics: \texttt{question}, \texttt{graph}, \texttt{q\_entity}, \texttt{a\_entity}, \texttt{answer}
+      \end{itemize}
+    \item \textbf{Phase 1} training:
+      \begin{itemize}
+        \item retriever warmup on heuristic labels (BCE + ranking, \(\rho=0.7\)), per-question subgraphs
+      \end{itemize}
+    \item \textbf{Training time note (our run)}:
+      \begin{itemize}
+        \item Phase 2 on CWQ: \textasciitilde 7 hours / epoch on an NVIDIA A100
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Key D-RAG selection parameters (sampler thresholds)}
+  \begin{itemize}
+    \item \textbf{Gumbel-Softmax temperature} (\texttt{--temperature}, default 0.5)
+      \begin{itemize}
+        \item lower \(\tau\) \(\Rightarrow\) more discrete selections; higher \(\tau\) \(\Rightarrow\) smoother gradients
+      \end{itemize}
+    \item \textbf{Max facts cap} (\texttt{--max\_facts\_cap}, default 100)
+      \begin{itemize}
+        \item keep at most top-\(k\) facts before thresholding (compute/memory control)
+      \end{itemize}
+    \item \textbf{Probability threshold} (\texttt{--prob\_threshold}, default 0.01; paper uses 0.01)
+      \begin{itemize}
+        \item filter selected/top facts below this probability; fallback to top-1 if empty
+      \end{itemize}
+    \item \textbf{Phase 1 loss mixing} (\(\rho\), default 0.7): BCE vs ranking loss in retriever warmup
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{D-RAG: results on CWQ (paper vs ours)}
+  \begin{itemize}
+    \item ComplexWebQuestions (CWQ), reported metrics: Hits@1 and Gen F1
+  \end{itemize}
+  \vspace{0.4em}
+  {\small
+  \begin{tabular}{@{}lrr@{}}
+    \toprule
+    Method & Hits@1 & Gen F1 \\
+    \midrule
+    Static Cascade (paper) & 54.3 & 60.6 \\
+    Dynamic Cascade (paper) & 55.9 & 61.9 \\
+    SubgraphRAG (paper) & 57.0 & 47.2 \\
+    GNN-RAG (paper) & 66.8 & 59.4 \\
+    \midrule
+    D-RAG (paper reported) & 63.8 & 70.3 \\
+    \textbf{D-RAG (ours, 20 epochs)} & \textbf{79.0} & \textbf{71.2} \\
+    \bottomrule
+  \end{tabular}
+  }
+  \vspace{0.4em}
+  \begin{itemize}
+    \item Paper comparison table is summarized from \texttt{docs/drag\_documentation.tex}
+    \item Observed training overhead vs cascade baselines: \textasciitilde 6.8\%--8.0\%
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{D-RAG: reproduce the 20-epoch Phase 2 run}
+  \begin{itemize}
+    \item Ensure a Phase 1 checkpoint exists (\texttt{checkpoints\_cwq\_subgraph/phase1\_best.pt})
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+python -m src.trainer.train_phase2 \
+  --heuristics_path data/train_heuristics_cwq_train.jsonl \
+  --val_heuristics_path data/train_heuristics_cwq_val.jsonl \
+  --phase1_checkpoint checkpoints_cwq_subgraph/phase1_best.pt \
+  --checkpoint_dir checkpoints_cwq_phase2_20ep \
+  --epochs 20 \
+  --batch_size 64 \
+  --lr 5e-5 \
+  --temperature 0.5 \
+  --ret_loss_weight 0.1 \
+  --max_facts_cap 100 \
+  --val_generation \
+  --eos_loss_weight 1.0
+  \end{lstlisting}
+\vspace{0.4em}
+\begin{itemize}
+  \item Practical runtime: \textasciitilde 7h/epoch on CWQ (A100) \(\Rightarrow\) plan multi-day training for 20 epochs.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Why a KG for Romanian literature?}
+  \begin{itemize}
+    \item Narrative texts contain characters, places, events, and recurring motifs
+    \item A KG enables:
+      \begin{itemize}
+        \item entity-centric exploration (Who interacts with whom? where?)
+        \item cross-document aggregation (recurring entities, hubs, communities)
+        \item provenance-aware evidence (every edge tied to text evidence)
+      \end{itemize}
+    \item Designed to scale from small samples to full corpora
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Datasets}
+  \begin{itemize}
+    \item \textbf{RO-Stories} (Hugging Face: \texttt{readerbench/ro-stories})
+      \begin{itemize}
+        \item Romanian narrative paragraphs (12{,}516 docs in the full corpus)
+        \item Field used: \texttt{paragraph} \textrightarrow text
+      \end{itemize}
+    \item \textbf{HistNERo} (Hugging Face: \texttt{avramandrei/histnero})
+      \begin{itemize}
+        \item Historical Romanian NER dataset (token classification)
+        \item Converted into doc-level text + \texttt{spans} with char offsets for ingestion
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Pipeline at a glance}
+  \begin{enumerate}
+    \item Ingest \textrightarrow normalize (Unicode NFC + diacritics)
+    \item Chunk text (overlap for context)
+    \item Extract:
+      \begin{itemize}
+        \item NER: regex / transformer (XLM-R NER) / gold HistNERo spans
+        \item Relations: heuristic or \textbf{LLM (Ollama JSON schema)} with evidence grounding
+      \end{itemize}
+    \item Resolve entities (lexical for scale; embedding-based resolution optional/roadmap)
+    \item Graph-level QC (constraints, dedupe, junk suppression)
+    \item Optional Event nodes derived from relations
+    \item Export Neo4j Cypher + analytics report
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Schema \& ontology (lightweight, constraint-friendly)}
+  \begin{itemize}
+    \item Core node types:
+      \begin{itemize}
+        \item \texttt{:Work} (document-level)
+        \item \texttt{:Mention} (surface span in text)
+        \item \texttt{:Entity} with secondary labels \texttt{:Character/:Person/:Location/:Event}
+      \end{itemize}
+    \item Key edges:
+      \begin{itemize}
+        \item \texttt{(Work)-[:HAS\_MENTION]->(Mention)}
+        \item \texttt{(Mention)-[:REFERS\_TO]->(Entity)}
+        \item \texttt{(Mention)-[:COREFERS\_WITH]->(Mention)} (derived)
+        \item Entity relations: \texttt{INTERACTS\_WITH}, \texttt{LOCATED\_IN}, \texttt{TRAVELS\_TO}, \dots
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Quality control at the graph level}
+  \begin{itemize}
+    \item Enforce constraints (examples):
+      \begin{itemize}
+        \item \texttt{LOCATED\_IN / TRAVELS\_TO}: target must be \texttt{Location}
+        \item forbid self-loops; drop type-impossible edges
+      \end{itemize}
+    \item Deduplicate edges:
+      \begin{itemize}
+        \item canonical direction for symmetric predicates (e.g., \texttt{INTERACTS\_WITH})
+        \item dedupe on (src, pred, tgt, doc, chunk)
+      \end{itemize}
+    \item Detect/suppress junk hubs:
+      \begin{itemize}
+        \item stopwords / very short tokens becoming high-degree entities
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Scaling: retrieval + caching}
+  \begin{itemize}
+    \item Problem: full-corpus runs can be dominated by model calls
+    \item Solution:
+      \begin{itemize}
+        \item Content-addressable cache by hash:
+          \begin{itemize}
+            \item NER candidates cached per chunk
+            \item LLM relation JSON cached per chunk + entity table
+          \end{itemize}
+        \item Retrieve only relevant prior context:
+          \begin{itemize}
+            \item pass previous chunk as context \textbf{only if shared entities overlap}
+          \end{itemize}
+      \end{itemize}
+    \item Outcome: incremental rebuilds become much faster
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Results (from current documentation)}
+  \begin{itemize}
+    \item Production run example (103 docs):
+  \end{itemize}
+  \vspace{0.3em}
+  \begin{tabular}{@{}lr@{}}
+    \toprule
+    Metric & Value \\
+    \midrule
+    Documents & 103 \\
+    Mentions extracted & 1{,}158 \\
+    Entities resolved & 30 (97\% reduction) \\
+    Relations & 102{,}316 \\
+    Runtime & 57s \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.5em}
+  \begin{itemize}
+    \item Full-corpus lexical run (12{,}519 docs): 13{,}106 chunks, 181k mentions, 31{,}721 entities, 257k relations
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{How to run (end-to-end)}
+  \begin{itemize}
+    \item Download corpora:
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+python scripts/download_rolit_datasets.py --output_dir data --limit 0
+  \end{lstlisting}
+  \begin{itemize}
+    \item Run pipeline (NER + LLM relations + QC + events + caching):
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+python run_full_pipeline.py \
+  --ro_stories_jsonl data/ro_stories_full.jsonl \
+  --histnero_jsonl data/histnero_full.jsonl \
+  --output_dir outputs/rolit_kg_full_run \
+  --run_name rolit_kg_full_run \
+  --ner_engine transformers \
+  --ner_model Davlan/xlm-roberta-base-ner-hrl \
+  --relations_engine ollama \
+  --ollama_url http://inference.ccrolabs.com \
+  --ollama_rel_model llama3.2:3b \
+  --ollama_rel_timeout_s 180 \
+  --cache_dir outputs/cache \
+  --resolution_mode lexical \
+  --checkpoint_after_extract \
+  --emit_event_nodes
+  \end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Neo4j load \& example queries}
+  \begin{itemize}
+    \item Load:
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+:source outputs/rolit_kg_full_run/cypher/constraints.cypher
+:source outputs/rolit_kg_full_run/cypher/load.cypher
+  \end{lstlisting}
+  \begin{itemize}
+    \item Starter queries live in: \texttt{docs/rolit\_kg\_starter\_queries.cypher}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Next steps}
+  \begin{itemize}
+    \item Improve extraction recall while maintaining precision:
+      \begin{itemize}
+        \item more relation-specific validators and confidence calibration
+      \end{itemize}
+    \item Faster scaling:
+      \begin{itemize}
+        \item batching, concurrency, and ANN-based entity resolution
+      \end{itemize}
+    \item Better grounding:
+      \begin{itemize}
+        \item align fictional mentions with historical entities (HistNERo) + external KBs
+      \end{itemize}
+    \item Product:
+      \begin{itemize}
+        \item Neo4j Bloom / small UI / QA over graph
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{How D-RAG and RoLit-KG connect}
+  \begin{itemize}
+    \item RoLit-KG gives you a \textbf{fresh KG} from Romanian text with provenance + Neo4j export
+    \item D-RAG consumes a KG/subgraph dataset for KGQA training and inference
+    \item Integration path (pragmatic):
+      \begin{itemize}
+        \item RoLit-KG \textrightarrow export triples (Entities + Relations) into a KGQA format
+        \item Build question/answer supervision (or synthetic QA) and train D-RAG on RoLit-KG-derived facts
+      \end{itemize}
+    \item Net: \textbf{KG construction + differentiable KGQA} in one repository
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Q\&A}
+  \centering
+  \Large Questions?
+\end{frame}
+
+\end{document}
+

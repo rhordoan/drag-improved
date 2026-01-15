@@ -22,6 +22,31 @@ from .common import (
 )
 
 
+class ExtractionInterrupted(RuntimeError):
+    """
+    Raised when the user interrupts extraction (Ctrl+C) but we still want to return
+    partial results so the caller can checkpoint what has been extracted so far.
+    """
+
+    def __init__(
+        self,
+        *,
+        mentions: List[Mention],
+        entities: List[Entity],
+        relations: List[Relation],
+        processed_chunks: int,
+        last_doc_id: Optional[str] = None,
+        last_chunk_id: Optional[str] = None,
+    ) -> None:
+        super().__init__("Extraction interrupted by user")
+        self.mentions = mentions
+        self.entities = entities
+        self.relations = relations
+        self.processed_chunks = processed_chunks
+        self.last_doc_id = last_doc_id
+        self.last_chunk_id = last_chunk_id
+
+
 HISTNERO_LABEL_TO_ENTITY_TYPE = {
     "PER": "Person",
     "PERSON": "Person",
@@ -521,6 +546,7 @@ def extract_relations_ollama(
     max_relations: int = 30,
     context_text: Optional[str] = None,
     cache_dir: Optional[str] = None,
+    cache_only: bool = False,
 ) -> List[Relation]:
     """
     LLM-based relation extraction using an Ollama-compatible API.
@@ -710,6 +736,9 @@ def extract_relations_ollama(
                     return _build_relations_from_parsed(cached)
         except Exception:
             cache_path = None
+    if cache_only:
+        # Explicitly skip network calls when the user wants to build from cache only.
+        return []
 
     resp = None
     last_err: Optional[Exception] = None
@@ -786,47 +815,66 @@ def extract_for_documents(
     llm_model: Optional[str] = None,
     llm_timeout_s: int = 60,
     cache_dir: Optional[str] = None,
+    relations_cache_only: bool = False,
 ) -> Tuple[List[Mention], List[Entity], List[Relation]]:
     mentions_all: List[Mention] = []
     entities_all: List[Entity] = []
     relations_all: List[Relation] = []
 
     doc_by_id = {d.doc_id: d for d in docs}
-    for doc_id, chunks in doc_chunks.items():
-        doc = doc_by_id[doc_id]
-        prev_chunk_text: Optional[str] = None
-        prev_chunk_norms: Optional[set] = None
-        for ch in chunks:
-            mentions, entities = extract_candidates_for_chunk(
-                doc,
-                ch,
-                ner_engine=ner_engine,
-                ner_model=ner_model,
-                cache_dir=cache_dir,
-            )
-            mentions_all.extend(mentions)
-            entities_all.extend(entities)
-            if relations_engine == "heuristic":
-                relations_all.extend(extract_relations_heuristic(doc=doc, chunk=ch, mentions=mentions))
-            elif relations_engine == "ollama":
-                if not llm_base_url or not llm_model:
-                    raise ValueError("llm_base_url and llm_model must be set when relations_engine='ollama'")
-                cur_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
-                ctx = prev_chunk_text if (prev_chunk_text and prev_chunk_norms and (cur_norms & prev_chunk_norms)) else None
-                relations_all.extend(
-                    extract_relations_ollama(
-                        doc=doc,
-                        chunk=ch,
-                        mentions=mentions,
-                        base_url=llm_base_url,
-                        model=llm_model,
-                        timeout_s=llm_timeout_s,
-                        context_text=ctx,
-                        cache_dir=cache_dir,
-                    )
+    processed_chunks = 0
+    last_doc_id: Optional[str] = None
+    last_chunk_id: Optional[str] = None
+    try:
+        for doc_id, chunks in doc_chunks.items():
+            doc = doc_by_id[doc_id]
+            prev_chunk_text: Optional[str] = None
+            prev_chunk_norms: Optional[set] = None
+            for ch in chunks:
+                last_doc_id = doc_id
+                last_chunk_id = ch.chunk_id
+
+                mentions, entities = extract_candidates_for_chunk(
+                    doc,
+                    ch,
+                    ner_engine=ner_engine,
+                    ner_model=ner_model,
+                    cache_dir=cache_dir,
                 )
-            prev_chunk_text = ch.text
-            prev_chunk_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
+                mentions_all.extend(mentions)
+                entities_all.extend(entities)
+                if relations_engine == "heuristic":
+                    relations_all.extend(extract_relations_heuristic(doc=doc, chunk=ch, mentions=mentions))
+                elif relations_engine == "ollama":
+                    if not llm_base_url or not llm_model:
+                        raise ValueError("llm_base_url and llm_model must be set when relations_engine='ollama'")
+                    cur_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
+                    ctx = prev_chunk_text if (prev_chunk_text and prev_chunk_norms and (cur_norms & prev_chunk_norms)) else None
+                    relations_all.extend(
+                        extract_relations_ollama(
+                            doc=doc,
+                            chunk=ch,
+                            mentions=mentions,
+                            base_url=llm_base_url,
+                            model=llm_model,
+                            timeout_s=llm_timeout_s,
+                            context_text=ctx,
+                            cache_dir=cache_dir,
+                            cache_only=relations_cache_only,
+                        )
+                    )
+                prev_chunk_text = ch.text
+                prev_chunk_norms = {normalize_mention(m.surface) for m in mentions if m.surface}
+                processed_chunks += 1
+    except KeyboardInterrupt as e:
+        raise ExtractionInterrupted(
+            mentions=mentions_all,
+            entities=entities_all,
+            relations=relations_all,
+            processed_chunks=processed_chunks,
+            last_doc_id=last_doc_id,
+            last_chunk_id=last_chunk_id,
+        ) from e
 
     return mentions_all, entities_all, relations_all
 

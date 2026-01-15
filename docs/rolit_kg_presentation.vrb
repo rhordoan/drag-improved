@@ -1,0 +1,11 @@
+\frametitle{Neo4j load \& example queries}
+\begin{itemize}
+    \item Load:
+  \end{itemize}
+  \begin{lstlisting}[style=code]
+:source outputs/rolit_kg_full_run/cypher/constraints.cypher
+:source outputs/rolit_kg_full_run/cypher/load.cypher
+  \end{lstlisting}
+  \begin{itemize}
+    \item Starter queries live in: \texttt{docs/rolit\_kg\_starter\_queries.cypher}
+  \end{itemize}
